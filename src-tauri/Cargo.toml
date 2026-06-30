@@ -1,0 +1,58 @@
+[package]
+name = "frostwall"
+version = "0.1.0"
+description = "Frostwall Beam — encrypted cross-platform file transfer"
+authors = ["you"]
+license = "MIT"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "frostwall_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+# async runtime + framing
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
+futures = "0.3"
+bytes = "1"
+
+# crypto: SPAKE2 pairing, AEAD, KDF, MAC
+spake2 = "0.4"
+x25519-dalek = "2"
+chacha20poly1305 = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2"
+rand = "0.8"
+blake3 = "1"
+
+# LAN discovery
+mdns-sd = "0.20"
+
+# utils
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "5"
+
+[dev-dependencies]
+tempfile = "3"
+
