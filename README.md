@@ -161,4 +161,4 @@ Issues and pull requests are welcome. Please run `cargo test` and `pnpm build` b
 
 ## License
 
-[MIT](LICENSE) © Frostwall Beam contributors
+[MIT](LICENSE) © [batu3384](https://github.com/batu3384)

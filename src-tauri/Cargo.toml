@@ -2,7 +2,7 @@
 name = "frostwall"
 version = "0.1.0"
 description = "Frostwall Beam — encrypted cross-platform file transfer"
-authors = ["you"]
+authors = ["batu3384 <batu3384@gmail.com>"]
 license = "MIT"
 edition = "2021"
 
