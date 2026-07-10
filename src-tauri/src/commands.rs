@@ -114,6 +114,16 @@ pub struct AppState {
     active_cancel: sync::Mutex<Option<Arc<AtomicBool>>>,
     /// Display name of the peer we're connecting to (join side).
     peer_display_name: Mutex<Option<String>>,
+    /// Active internet-host mailbox registration to unregister on disconnect/clear.
+    internet_cleanup: Mutex<Option<InternetCleanup>>,
+}
+
+/// Mailbox registration held by an internet-mode host until pairing completes
+/// or the session is torn down.
+struct InternetCleanup {
+    mailbox: internet::Mailbox,
+    code: String,
+    token: Option<String>,
 }
 
 impl AppState {
@@ -131,6 +141,13 @@ impl AppState {
             incoming_decision: Mutex::new(None),
             active_cancel: sync::Mutex::new(None),
             peer_display_name: Mutex::new(None),
+            internet_cleanup: Mutex::new(None),
+        }
+    }
+
+    async fn cleanup_internet(&self) {
+        if let Some(c) = self.internet_cleanup.lock().await.take() {
+            c.mailbox.unregister(&c.code, c.token.as_deref()).await;
         }
     }
 
@@ -162,6 +179,7 @@ impl AppState {
         if let Ok(mut g) = self.active_cancel.lock() {
             *g = None;
         }
+        self.cleanup_internet().await;
     }
 }
 
@@ -626,6 +644,12 @@ pub async fn host_start_internet(
         .await
         .map_err(|e| e.to_string())?;
 
+    *state.internet_cleanup.lock().await = Some(InternetCleanup {
+        mailbox: mailbox.clone(),
+        code: code.clone(),
+        token: None,
+    });
+
     let app = app.clone();
     let handle = async_runtime::spawn(async move {
         // Mirrors host_start's accept loop (see MAX_PAIRING_ATTEMPTS doc
@@ -642,6 +666,10 @@ pub async fn host_start_internet(
             };
             match session::host_handshake(conn, &code).await {
                 Ok(session) => {
+                    mailbox.unregister(&code, None).await;
+                    if let Some(st) = app.try_state::<AppState>() {
+                        st.internet_cleanup.lock().await.take();
+                    }
                     establish_session(&app, session).await;
                     break;
                 }
@@ -661,7 +689,10 @@ pub async fn host_start_internet(
                 }
             }
         }
-        mailbox.unregister(&code).await;
+        mailbox.unregister(&code, None).await;
+        if let Some(st) = app.try_state::<AppState>() {
+            st.internet_cleanup.lock().await.take();
+        }
     });
     *state.pairing_task.lock().await = Some(handle);
 
