@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde::Serialize;
@@ -17,6 +17,7 @@ use tauri::async_runtime::JoinHandle;
 
 use crate::crypto::SessionKeys;
 use crate::discovery::{self, Discovery};
+use crate::internet;
 use crate::liveness;
 use crate::protocol::{self, Message};
 use crate::session::{self, Session};
@@ -78,6 +79,7 @@ pub struct DiscoveredPeer {
 pub struct ConfigPayload {
     pub download_dir: Option<String>,
     pub device_name: Option<String>,
+    pub mailbox_url: Option<String>,
 }
 
 enum SessionCmd {
@@ -93,6 +95,9 @@ pub struct AppState {
     liveness_key: Mutex<Option<[u8; 32]>>,
     download_dir: sync::Mutex<Option<String>>,
     device_name: sync::Mutex<Option<String>>,
+    /// Base URL of the mailbox rendezvous service, used for internet
+    /// (non-LAN) sessions. None until the user configures one.
+    mailbox_url: sync::Mutex<Option<String>>,
     /// True while a transfer (send or receive) is in flight. Guards against a
     /// second transfer being queued on top of the current one.
     in_flight: sync::Mutex<bool>,
@@ -119,6 +124,7 @@ impl AppState {
             liveness_key: Mutex::new(None),
             download_dir: sync::Mutex::new(cfg.download_dir),
             device_name: sync::Mutex::new(cfg.device_name),
+            mailbox_url: sync::Mutex::new(cfg.mailbox_url),
             in_flight: sync::Mutex::new(false),
             config_lock: sync::Mutex::new(()),
             pairing_task: Mutex::new(None),
@@ -128,7 +134,23 @@ impl AppState {
         }
     }
 
+    async fn abort_pairing(&self) {
+        if let Some(h) = self.pairing_task.lock().await.take() {
+            h.abort();
+        }
+    }
+
+    fn trigger_cancel(&self) {
+        if let Ok(g) = self.active_cancel.lock() {
+            if let Some(flag) = g.as_ref() {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
     async fn clear(&self) {
+        self.abort_pairing().await;
+        self.trigger_cancel();
         if let Some(tx) = self.incoming_decision.lock().await.take() {
             let _ = tx.send(false);
         }
@@ -576,6 +598,76 @@ pub async fn host_start(app: AppHandle, state: State<'_, AppState>, code: String
     Ok(())
 }
 
+/// Host: same pairing flow as [`host_start`], but reachable across
+/// different networks. Publishes our `iroh` `EndpointId` under `code` on
+/// the configured mailbox service instead of advertising via mDNS, and
+/// accepts the joiner over a NAT-traversing iroh connection (direct when
+/// possible, relayed otherwise) instead of a LAN TCP socket. The SPAKE2
+/// handshake and everything after it is identical to the LAN path.
+#[tauri::command]
+pub async fn host_start_internet(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<(), String> {
+    state.clear().await;
+
+    let mailbox_url = state
+        .mailbox_url
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or(None)
+        .ok_or_else(|| "mailbox server is not configured".to_string())?;
+
+    let ep = internet::host_endpoint().await.map_err(|e| e.to_string())?;
+    let mailbox = internet::Mailbox::new(mailbox_url);
+    mailbox
+        .register(&code, &internet::endpoint_id_string(&ep))
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let app = app.clone();
+    let handle = async_runtime::spawn(async move {
+        // Mirrors host_start's accept loop (see MAX_PAIRING_ATTEMPTS doc
+        // there): a stalled or wrong-code handshake doesn't consume the
+        // mailbox registration, only repeated failures do.
+        let mut bad_code_attempts = 0u32;
+        loop {
+            let conn = match internet::accept_one(&ep).await {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = app.emit(EV_ERROR, e.to_string());
+                    break;
+                }
+            };
+            match session::host_handshake(conn, &code).await {
+                Ok(session) => {
+                    establish_session(&app, session).await;
+                    break;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("timed out") || msg.contains("peer stalled") {
+                        continue;
+                    }
+                    bad_code_attempts += 1;
+                    if bad_code_attempts >= MAX_PAIRING_ATTEMPTS {
+                        let _ = app.emit(
+                            EV_ERROR,
+                            format!("too many failed pairing attempts ({e}); please regenerate the code"),
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+        mailbox.unregister(&code).await;
+    });
+    *state.pairing_task.lock().await = Some(handle);
+
+    Ok(())
+}
+
 /// Discover Frostwall hosts on the LAN (for multi-host selection).
 #[tauri::command]
 pub async fn discover_peers() -> Result<Vec<DiscoveredPeer>, String> {
@@ -651,6 +743,57 @@ pub async fn join(app: AppHandle, state: State<'_, AppState>, code: String) -> R
     .await
 }
 
+/// Joiner: same pairing flow as [`join`], but for a host on a different
+/// network. Looks the host's `EndpointId` up on the configured mailbox
+/// service by `code`, then dials it over `iroh` (direct connection when
+/// NAT allows, transparently relayed otherwise).
+#[tauri::command]
+pub async fn join_internet(app: AppHandle, state: State<'_, AppState>, code: String) -> Result<(), String> {
+    state.clear().await;
+
+    let mailbox_url = state
+        .mailbox_url
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or(None)
+        .ok_or_else(|| "mailbox server is not configured".to_string())?;
+
+    let app = app.clone();
+    let handle = async_runtime::spawn(async move {
+        let mailbox = internet::Mailbox::new(mailbox_url);
+        let endpoint_id = match mailbox.lookup(&code).await {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = app.emit(EV_ERROR, e.to_string());
+                return;
+            }
+        };
+        let ep = match internet::join_endpoint().await {
+            Ok(ep) => ep,
+            Err(e) => {
+                let _ = app.emit(EV_ERROR, e.to_string());
+                return;
+            }
+        };
+        let conn = match internet::connect_to(&ep, &endpoint_id).await {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = app.emit(EV_ERROR, e.to_string());
+                return;
+            }
+        };
+        match session::joiner_handshake(conn, &code).await {
+            Ok(session) => establish_session(&app, session).await,
+            Err(e) => {
+                let _ = app.emit(EV_ERROR, e.to_string());
+            }
+        }
+    });
+    *state.pairing_task.lock().await = Some(handle);
+
+    Ok(())
+}
+
 /// Send a list of files/folders to the peer.
 #[tauri::command]
 pub async fn send_files(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
@@ -720,15 +863,14 @@ pub async fn cancel_transfer(state: State<'_, AppState>) -> Result<(), String> {
 /// pairing (host/join) that has not yet connected.
 #[tauri::command]
 pub async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    // Cancel a still-running host/join task (drops its listener + mDNS daemon).
-    if let Some(h) = state.pairing_task.lock().await.take() {
-        h.abort();
-    }
+    state.abort_pairing().await;
+    state.trigger_cancel();
     if let Some(tx) = state.incoming_decision.lock().await.take() {
         let _ = tx.send(false);
     }
     // Dropping our sender makes the coordinator's cmd channel close => it exits.
     *state.cmd_tx.lock().await = None;
+    state.clear().await;
     Ok(())
 }
 
@@ -763,9 +905,16 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<ConfigPayload, Str
         .map(|g| g.clone())
         .ok()
         .flatten();
+    let mailbox_url = state
+        .mailbox_url
+        .lock()
+        .map(|g| g.clone())
+        .ok()
+        .flatten();
     Ok(ConfigPayload {
         download_dir,
         device_name,
+        mailbox_url,
     })
 }
 
@@ -827,6 +976,30 @@ pub async fn set_device_name(state: State<'_, AppState>, name: String) -> Result
     Ok(())
 }
 
+/// Set (or, if blank, clear) the mailbox rendezvous URL used for internet
+/// sessions. A non-empty value must look like an `http(s)://` URL.
+#[tauri::command]
+pub async fn set_mailbox_url(state: State<'_, AppState>, url: String) -> Result<(), String> {
+    let trimmed = url.trim();
+    let value = if trimmed.is_empty() {
+        None
+    } else {
+        if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+            return Err("mailbox URL must start with http:// or https://".to_string());
+        }
+        Some(trimmed.trim_end_matches('/').to_string())
+    };
+    let _guard = state.config_lock.lock();
+    if let Ok(mut g) = state.mailbox_url.lock() {
+        *g = value.clone();
+    }
+    let mut cfg = crate::config::load();
+    cfg.mailbox_url = value;
+    crate::config::save(&cfg).map_err(|e| format!("failed to persist config: {e}"))?;
+    drop(_guard);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -834,5 +1007,16 @@ mod tests {
     #[test]
     fn downloads_root_is_some() {
         assert!(downloads_root().is_some());
+    }
+
+    #[tokio::test]
+    async fn clear_aborts_pairing_task() {
+        let state = AppState::new();
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        *state.pairing_task.lock().await = Some(handle);
+        state.clear().await;
+        assert!(state.pairing_task.lock().await.is_none());
     }
 }
