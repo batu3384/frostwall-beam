@@ -59,6 +59,7 @@ export default function App() {
   const [transfer, setTransfer] = useState<TransferStart | null>(null);
   const [progress, setProgress] = useState<Progress | null>(null);
   const [transferDone, setTransferDone] = useState(false);
+  const [speed, setSpeed] = useState(0);
 
   const [dragging, setDragging] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -108,9 +109,9 @@ export default function App() {
   }, []);
 
   const respondPending = useCallback(async (accept: boolean) => {
-    setPendingTransfer(null);
     try {
       await invoke("respond_incoming_transfer", { accept });
+      setPendingTransfer(null);
       if (!accept) pushToast("info", t("toast.transferRejected"));
     } catch (e) {
       showError(String(e));
@@ -142,10 +143,11 @@ export default function App() {
           const inst = (p.transferred - r.bytes) / dt;
           r.speed = r.speed * 0.7 + inst * 0.3;
         }
-        r.at = now; r.bytes = p.transferred; setProgress(p);
+        r.at = now; r.bytes = p.transferred; setSpeed(r.speed); setProgress(p);
       }));
       unlistens.push(await add<TransferStart>("frostwall://transfer-start", (tr) => {
         speedRef.current = { at: 0, bytes: 0, speed: 0 };
+        setSpeed(0);
         setTransfer(tr); setTransferDone(false);
         setProgress({ transferred: 0, total: tr.total, percent: 0, direction: tr.direction });
       }));
@@ -160,7 +162,8 @@ export default function App() {
           }));
         }
         if (!ok) {
-          setTransfer(null); setProgress(null);
+          pushToast("err", t("toast.transferFailed"));
+          setTransfer(null); setProgress(null); setSpeed(0);
           return;
         }
         setTransferDone(true);
@@ -214,15 +217,23 @@ export default function App() {
 
   const startHost = useCallback(async () => {
     setError(null);
+    if (net === "internet" && !config?.mailboxUrl?.trim()) {
+      showError(t("err.mailboxNotConfigured"));
+      return;
+    }
     try {
       const c = await invoke<string>("generate_code");
       setCode(c); setPhase("hosting");
       await invoke(net === "internet" ? "host_start_internet" : "host_start", { code: c });
     } catch (e) { showError(String(e)); setPhase("idle"); }
-  }, [net, showError]);
+  }, [net, showError, config?.mailboxUrl]);
 
   const startJoin = useCallback(async () => {
     if (joinCode.length !== 6) { showError(t("join.error6")); return; }
+    if (net === "internet" && !config?.mailboxUrl?.trim()) {
+      showError(t("err.mailboxNotConfigured"));
+      return;
+    }
     setError(null); setPhase("joining"); setPeerChoices(null);
     try {
       if (net === "internet") {
@@ -246,7 +257,7 @@ export default function App() {
       }
       setPeerChoices(peers);
     } catch (e) { showError(String(e)); setPhase("idle"); }
-  }, [joinCode, net, showError, t]);
+  }, [joinCode, net, showError, t, config?.mailboxUrl]);
 
   const connectToPeer = useCallback(async (peer: DiscoveredPeer) => {
     setPeerChoices(null);
@@ -305,13 +316,14 @@ export default function App() {
 
   const saveDirLabel = config?.downloadDir ?? t("settings.saveDirDefault");
 
+  const mailboxReady = Boolean(config?.mailboxUrl?.trim());
+  const internetBlocked = net === "internet" && !mailboxReady;
   const busy = phase === "hosting" || phase === "joining";
-  const speed = speedRef.current.speed;
   const eta = progress && speed > 0 ? Math.ceil((progress.total - progress.transferred) / speed) : 0;
   const pct = progress ? progress.percent : 0;
 
   return (
-    <div className="relative h-full w-full overflow-hidden text-slate-100">
+    <div className="relative h-full w-full overflow-hidden text-[var(--text-body)]">
       <div className="pointer-events-none absolute inset-0 app-shell" />
 
       <div className="relative flex h-full flex-col">
@@ -383,8 +395,11 @@ export default function App() {
                     <div className="frost-panel rounded-2xl p-6">
                       <p className="mb-2 text-sm font-medium text-sky-50">{t("host.heading")}</p>
                       <p className="mb-5 text-sm text-slate-400">{t(net === "internet" ? "host.descInternet" : "host.desc")}</p>
-                      <button onClick={startHost}
-                        className="frost-glow w-full rounded-xl bg-gradient-to-r from-sky-400 via-sky-500 to-cyan-500 px-4 py-3.5 font-medium text-white transition hover:brightness-110 active:scale-[0.99]">
+                      {internetBlocked && (
+                        <p className="mb-4 text-sm text-amber-300/90">{t("net.mailboxRequired")}</p>
+                      )}
+                      <button onClick={startHost} disabled={internetBlocked}
+                        className="frost-glow w-full rounded-xl bg-gradient-to-r from-sky-400 via-sky-500 to-cyan-500 px-4 py-3.5 font-medium text-white transition enabled:hover:brightness-110 active:scale-[0.99] disabled:opacity-40">
                         {t("host.button")}
                       </button>
                     </div>
@@ -392,13 +407,16 @@ export default function App() {
                     <div className="frost-panel rounded-2xl p-6">
                       <p className="mb-2 text-sm font-medium text-sky-50">{t("join.heading")}</p>
                       <p className="mb-5 text-sm text-slate-400">{t(net === "internet" ? "join.descInternet" : "join.desc")}</p>
+                      {internetBlocked && (
+                        <p className="mb-4 text-sm text-amber-300/90">{t("net.mailboxRequired")}</p>
+                      )}
                       <div className="flex gap-2">
                         <input id="join-code" value={joinCode} aria-label={t("join.heading")}
                           onChange={(e) => setJoinCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
                           onKeyDown={(e) => e.key === "Enter" && startJoin()}
                           inputMode="numeric" placeholder="••••••"
                           className="font-mono-num min-w-0 flex-1 rounded-xl border border-sky-300/15 bg-slate-950/50 px-4 py-3.5 text-center text-2xl tracking-[0.45em] text-sky-50 outline-none transition focus-visible:border-sky-400/60" />
-                        <button onClick={startJoin} disabled={joinCode.length !== 6}
+                        <button onClick={startJoin} disabled={joinCode.length !== 6 || internetBlocked}
                           className="frost-glow shrink-0 rounded-xl bg-gradient-to-r from-sky-400 via-sky-500 to-cyan-500 px-6 py-3.5 font-medium text-white transition enabled:hover:brightness-110 active:scale-[0.99] disabled:opacity-40">
                           {t("join.button")}
                         </button>
@@ -432,7 +450,9 @@ export default function App() {
                         <span className="absolute inline-flex h-12 w-12 rounded-full bg-cyan-400/10 animate-radar [animation-delay:0.8s]" />
                         <span className="relative h-10 w-10 rounded-full bg-gradient-to-br from-sky-400 to-cyan-500" />
                       </div>
-                      <p className="text-sm text-slate-300">{t("joining.scanning")}</p>
+                      <p className="text-sm text-slate-300">
+                        {t(net === "internet" ? "join.waitingInternet" : "joining.scanning")}
+                      </p>
                     </div>
                   )}
                   <div className="mt-7 flex justify-center">
@@ -642,6 +662,11 @@ function SettingsModal({ t, lang, setLang, theme, setTheme, config, saveDirLabel
   const [mailboxUrl, setMailboxUrl] = useState(config?.mailboxUrl ?? "");
 
   // Escape to close
+  useEffect(() => {
+    setName(config?.deviceName ?? "");
+    setMailboxUrl(config?.mailboxUrl ?? "");
+  }, [config?.deviceName, config?.mailboxUrl]);
+
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", h);
