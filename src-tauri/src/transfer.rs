@@ -53,7 +53,29 @@ fn check_cancel(cancel: &AtomicBool) -> Result<()> {
     }
 }
 
-async fn recv_or_cancel(conn: &mut Connection, cancel: &AtomicBool) -> Result<Vec<u8>> {
+/// AEAD-wrap a control-plane message (manifest, accept, done, …) for the wire.
+pub fn seal_control(keys: &SessionKeys, msg: &Message) -> Result<Vec<u8>> {
+    let inner = protocol::encode(msg)?;
+    let ct = crypto::encrypt_chunk(&keys.control_key, &inner)?;
+    protocol::encode(&Message::Encrypted(ct))
+}
+
+/// Unwrap a control-plane message received on the wire.
+pub fn open_control(keys: &SessionKeys, frame: &[u8]) -> Result<Message> {
+    match protocol::decode(frame)? {
+        Message::Encrypted(ct) => {
+            let inner = crypto::decrypt_chunk(&keys.control_key, &ct)?;
+            protocol::decode(&inner)
+        }
+        other => Err(anyhow!("expected encrypted control message, got {other:?}")),
+    }
+}
+
+async fn recv_or_cancel(
+    conn: &mut Connection,
+    cancel: &AtomicBool,
+    keys: &SessionKeys,
+) -> Result<Vec<u8>> {
     loop {
         tokio::select! {
             biased;
@@ -62,7 +84,7 @@ async fn recv_or_cancel(conn: &mut Connection, cancel: &AtomicBool) -> Result<Ve
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
             } => {
-                let _ = conn.send(&protocol::encode(&Message::Cancel)?).await;
+                let _ = conn.send(&seal_control(keys, &Message::Cancel)?).await;
                 return Err(anyhow!("transfer cancelled"));
             }
             frame = conn.recv() => return frame.map_err(Into::into),
@@ -155,8 +177,12 @@ pub fn validate_manifest(entries: &[ManifestEntry]) -> Result<u64> {
     if entries.len() > MAX_FILES {
         return Err(anyhow!("manifest exceeds {MAX_FILES} files"));
     }
+    let mut seen = HashSet::new();
     let mut total: u64 = 0;
     for e in entries {
+        if !seen.insert(e.rel_path.clone()) {
+            return Err(anyhow!("duplicate path in manifest"));
+        }
         // confine_path checks the path is safe; ignore the built dest here.
         confine_path(Path::new("."), &e.rel_path)?;
         total = total
@@ -256,6 +282,9 @@ pub async fn send<F: FnMut(Progress)>(
 ) -> Result<()> {
     check_cancel(cancel)?;
     // Build and send the manifest (stat once, here — not again mid-stream).
+    if items.len() > MAX_FILES {
+        return Err(anyhow!("transfer exceeds {MAX_FILES} files"));
+    }
     let mut entries = Vec::with_capacity(items.len());
     let mut total: u64 = 0;
     for it in items {
@@ -265,11 +294,11 @@ pub async fn send<F: FnMut(Progress)>(
             .ok_or_else(|| anyhow!("total size overflow"))?;
         entries.push(ManifestEntry { rel_path: it.rel_path.clone(), size });
     }
-    conn.send(&protocol::encode(&Message::Manifest(entries))?).await?;
+    conn.send(&seal_control(keys, &Message::Manifest(entries))?).await?;
 
     // Wait for the receiver to accept before sending encrypted payload.
-    let reply = recv_or_cancel(conn, cancel).await?;
-    match protocol::decode(&reply)? {
+    let reply = recv_or_cancel(conn, cancel, keys).await?;
+    match open_control(keys, &reply)? {
         Message::Accept => {}
         Message::Reject => return Err(anyhow!("transfer rejected by peer")),
         Message::Cancel => return Err(anyhow!("transfer cancelled by peer")),
@@ -297,12 +326,12 @@ pub async fn send<F: FnMut(Progress)>(
             on_progress(Progress { transferred, total });
         }
         let hash = *hasher.finalize().as_bytes();
-        conn.send(&protocol::encode(&Message::FileEnd(hash))?).await?;
+        conn.send(&seal_control(keys, &Message::FileEnd(hash))?).await?;
     }
 
     // Wait for the receiver to confirm every hash verified.
-    let reply = recv_or_cancel(conn, cancel).await?;
-    match protocol::decode(&reply)? {
+    let reply = recv_or_cancel(conn, cancel, keys).await?;
+    match open_control(keys, &reply)? {
         Message::Done => Ok(()),
         Message::Cancel => Err(anyhow!("transfer cancelled by peer")),
         other => Err(anyhow!("expected Done, got {other:?}")),
@@ -319,14 +348,14 @@ pub async fn recv<F: FnMut(Progress)>(
     on_progress: &mut F,
     cancel: &AtomicBool,
 ) -> Result<()> {
-    let first = recv_or_cancel(conn, cancel).await?;
-    match protocol::decode(&first)? {
+    let first = recv_or_cancel(conn, cancel, keys).await?;
+    match open_control(keys, &first)? {
         Message::Manifest(ref entries) => {
             validate_manifest(entries)?;
         }
         other => return Err(anyhow!("expected Manifest, got {other:?}")),
     }
-    conn.send(&protocol::encode(&Message::Accept)?).await?;
+    conn.send(&seal_control(keys, &Message::Accept)?).await?;
     recv_from_first(conn, keys, dest_dir, on_progress, first, cancel).await
 }
 
@@ -341,7 +370,7 @@ pub async fn recv_from_first<F: FnMut(Progress)>(
     first_frame: Vec<u8>,
     cancel: &AtomicBool,
 ) -> Result<()> {
-    let entries = match protocol::decode(&first_frame)? {
+    let entries = match open_control(keys, &first_frame)? {
         Message::Manifest(e) => e,
         other => return Err(anyhow!("expected Manifest, got {other:?}")),
     };
@@ -362,11 +391,11 @@ pub async fn recv_from_first<F: FnMut(Progress)>(
 
         // Receive one file into the temp path; on ANY error remove the temp
         // so a malformed/truncated/malicious transfer leaves nothing behind.
-        let result = recv_one_file(conn, key, &partial, entry.size, total, &mut transferred, on_progress, cancel).await;
+        let result = recv_one_file(conn, keys, key, &partial, entry.size, total, &mut transferred, on_progress, cancel).await;
         if result.is_err() {
             let _ = fs::remove_file(&partial).await;
             if cancel.load(Ordering::Relaxed) {
-                let _ = conn.send(&protocol::encode(&Message::Cancel)?).await;
+                let _ = conn.send(&seal_control(keys, &Message::Cancel)?).await;
             }
             return result;
         }
@@ -374,7 +403,7 @@ pub async fn recv_from_first<F: FnMut(Progress)>(
         fs::rename(&partial, &dest).await?;
     }
 
-    conn.send(&protocol::encode(&Message::Done)?).await?;
+    conn.send(&seal_control(keys, &Message::Done)?).await?;
     Ok(())
 }
 
@@ -383,6 +412,7 @@ pub async fn recv_from_first<F: FnMut(Progress)>(
 /// removing the temp — caller handles cleanup) on any failure.
 async fn recv_one_file<F: FnMut(Progress)>(
     conn: &mut Connection,
+    keys: &SessionKeys,
     key: &[u8; 32],
     partial: &Path,
     declared_size: u64,
@@ -396,7 +426,7 @@ async fn recv_one_file<F: FnMut(Progress)>(
     let mut written: u64 = 0;
     loop {
         check_cancel(cancel)?;
-        let bytes = recv_or_cancel(conn, cancel).await?;
+        let bytes = recv_or_cancel(conn, cancel, keys).await?;
         match protocol::decode(&bytes)? {
             Message::Chunk(ct) => {
                 let pt = crypto::decrypt_chunk(key, &ct)?;
@@ -419,6 +449,11 @@ async fn recv_one_file<F: FnMut(Progress)>(
                 on_progress(Progress { transferred: *transferred, total });
             }
             Message::FileEnd(expected) => {
+                if written != declared_size {
+                    return Err(anyhow!(
+                        "file size mismatch: expected {declared_size}, got {written}"
+                    ));
+                }
                 let got = *hasher.finalize().as_bytes();
                 if got != expected {
                     return Err(anyhow!("integrity check failed"));
@@ -534,7 +569,7 @@ mod tests {
         declared_size: Option<u64>,    // None => sum of chunk lengths
     }
 
-    async fn evil_send(mut conn: Connection, key: &[u8; 32], files: Vec<EvilFile>) {
+    async fn evil_send(mut conn: Connection, keys: &SessionKeys, files: Vec<EvilFile>) {
         let entries: Vec<ManifestEntry> = files
             .iter()
             .map(|f| ManifestEntry {
@@ -543,16 +578,20 @@ mod tests {
                     .unwrap_or_else(|| f.chunks.iter().map(|c| c.len() as u64).sum()),
             })
             .collect();
-        conn.send(&protocol::encode(&Message::Manifest(entries)).unwrap()).await.unwrap();
+        conn.send(&seal_control(keys, &Message::Manifest(entries)).unwrap())
+            .await
+            .unwrap();
         for f in files {
             let mut hasher = blake3::Hasher::new();
             for pt in &f.chunks {
                 hasher.update(pt);
-                let ct = crypto::encrypt_chunk(key, pt).unwrap();
+                let ct = crypto::encrypt_chunk(&keys.file_key, pt).unwrap();
                 conn.send(&protocol::encode(&Message::Chunk(ct)).unwrap()).await.unwrap();
             }
             let hash = f.hash.unwrap_or_else(|| *hasher.finalize().as_bytes());
-            conn.send(&protocol::encode(&Message::FileEnd(hash)).unwrap()).await.unwrap();
+            conn.send(&seal_control(keys, &Message::FileEnd(hash)).unwrap())
+                .await
+                .unwrap();
         }
     }
 
@@ -565,8 +604,8 @@ mod tests {
         let dest = dir.path().join("out");
 
         let evil = vec![EvilFile { rel: "../evil.txt".into(), chunks: vec![b"pwn".to_vec()], hash: None, declared_size: None }];
-        let k = keys.file_key;
-        tokio::spawn(async move { evil_send(a, &k, evil).await });
+        let keys_a = keys.clone();
+        tokio::spawn(async move { evil_send(a, &keys_a, evil).await });
 
         let cancel = no_cancel();
         let r = recv(&mut b, &keys, &dest, &mut |_| {}, &cancel).await;
@@ -589,8 +628,8 @@ mod tests {
             hash: None,
             declared_size: Some(3),
         }];
-        let k = keys.file_key;
-        tokio::spawn(async move { evil_send(a, &k, evil).await });
+        let keys_a = keys.clone();
+        tokio::spawn(async move { evil_send(a, &keys_a, evil).await });
 
         let cancel = no_cancel();
         let r = recv(&mut b, &keys, &dest, &mut |_| {}, &cancel).await;
@@ -615,14 +654,37 @@ mod tests {
             hash: Some(wrong_hash),
             declared_size: None,
         }];
-        let k = keys.file_key;
-        tokio::spawn(async move { evil_send(a, &k, evil).await });
+        let keys_a = keys.clone();
+        tokio::spawn(async move { evil_send(a, &keys_a, evil).await });
 
         let cancel = no_cancel();
         let r = recv(&mut b, &keys, &dest, &mut |_| {}, &cancel).await;
         assert!(r.is_err());
         assert!(!dest.join("bad.txt").exists());
         assert!(!dest.join("bad.txt.frostwallpart").exists());
+    }
+
+    // ---- C3b: peer sending fewer bytes than declared is rejected ----
+    #[tokio::test]
+    async fn recv_rejects_undersized_file() {
+        let (mut a, mut b) = loopback_pair().await;
+        let keys = SessionKeys::derive(b"shared");
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("out");
+
+        let evil = vec![EvilFile {
+            rel: "short.txt".into(),
+            chunks: vec![b"x".to_vec()],
+            hash: None,
+            declared_size: Some(100),
+        }];
+        let keys_a = keys.clone();
+        tokio::spawn(async move { evil_send(a, &keys_a, evil).await });
+
+        let cancel = no_cancel();
+        let r = recv(&mut b, &keys, &dest, &mut |_| {}, &cancel).await;
+        assert!(r.is_err());
+        assert!(!dest.join("short.txt").exists());
     }
 
     // ---- happy path still works + final file present ----

@@ -34,6 +34,8 @@ pub struct SessionKeys {
     pub confirm_a: [u8; MAC_LEN],
     /// MAC key the responder (B) uses to prove it derived the session key.
     pub confirm_b: [u8; MAC_LEN],
+    /// Encrypts/decrypts control-plane messages (manifest, accept, done, …).
+    pub control_key: [u8; AEAD_KEY_LEN],
     /// Seed for the rotating 6-digit liveness code.
     pub liveness_key: [u8; MAC_LEN],
 }
@@ -49,15 +51,18 @@ impl SessionKeys {
         let mut file_key = [0u8; AEAD_KEY_LEN];
         let mut confirm_a = [0u8; MAC_LEN];
         let mut confirm_b = [0u8; MAC_LEN];
+        let mut control_key = [0u8; AEAD_KEY_LEN];
         let mut liveness_key = [0u8; MAC_LEN];
         expand(b"frostwall/v1/file-key", &mut file_key);
         expand(b"frostwall/v1/confirm-a", &mut confirm_a);
         expand(b"frostwall/v1/confirm-b", &mut confirm_b);
+        expand(b"frostwall/v1/control-key", &mut control_key);
         expand(b"frostwall/v1/liveness", &mut liveness_key);
         SessionKeys {
             file_key,
             confirm_a,
             confirm_b,
+            control_key,
             liveness_key,
         }
     }

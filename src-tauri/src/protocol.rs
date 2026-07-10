@@ -45,6 +45,9 @@ pub enum Message {
     Reject,
     /// Either side: abort the in-flight transfer without tearing down the session.
     Cancel,
+    /// AEAD-encrypted inner [`Message`] (`nonce || ciphertext+tag`), using the
+    /// session control key. Hides manifest metadata and control replies on LAN TCP.
+    Encrypted(Vec<u8>),
 }
 
 /// Encode a message to `<version byte> || bincode(body)`.

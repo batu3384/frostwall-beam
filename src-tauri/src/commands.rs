@@ -400,7 +400,7 @@ async fn run_coordinator(
                     // writing anything (N3): reject unsafe paths/counts/sizes
                     // up front so a malicious transfer neither renders an
                     // attacker-chosen path nor reaches the file layer.
-                    let entries = match protocol::decode(&frame) {
+                    let entries = match transfer::open_control(&keys, &frame) {
                         Ok(Message::Manifest(e)) => e,
                         Ok(other) => {
                             let _ = app.emit(EV_ERROR, format!("unexpected message: {other:?}"));
@@ -439,13 +439,13 @@ async fn run_coordinator(
                         false
                     };
                     if !accepted {
-                        if let Ok(reject) = protocol::encode(&Message::Reject) {
+                        if let Ok(reject) = transfer::seal_control(&keys, &Message::Reject) {
                             let _ = conn.send(&reject).await;
                         }
                         let _ = app.emit(EV_TRANSFER_DONE, false);
                         continue;
                     }
-                    match protocol::encode(&Message::Accept) {
+                    match transfer::seal_control(&keys, &Message::Accept) {
                         Ok(accept) => {
                             if let Err(e) = conn.send(&accept).await {
                                 let _ = app.emit(EV_ERROR, e.to_string());
@@ -1019,16 +1019,34 @@ pub async fn set_device_name(state: State<'_, AppState>, name: String) -> Result
 
 /// Set (or, if blank, clear) the mailbox rendezvous URL used for internet
 /// sessions. A non-empty value must look like an `http(s)://` URL.
+/// Accept only HTTPS mailbox URLs in release builds; allow local HTTP in debug
+/// for integration testing against a dev mailbox.
+fn mailbox_url_allowed(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    #[cfg(debug_assertions)]
+    {
+        if url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Persist the mailbox rendezvous base URL (internet mode).
 #[tauri::command]
 pub async fn set_mailbox_url(state: State<'_, AppState>, url: String) -> Result<(), String> {
     let trimmed = url.trim();
     let value = if trimmed.is_empty() {
         None
-    } else {
-        if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
-            return Err("mailbox URL must start with http:// or https://".to_string());
-        }
+    } else if mailbox_url_allowed(trimmed) {
         Some(trimmed.trim_end_matches('/').to_string())
+    } else {
+        return Err(
+            "mailbox URL must use https:// (http://127.0.0.1 or http://localhost only in debug builds)"
+                .to_string(),
+        );
     };
     let _guard = state.config_lock.lock();
     if let Ok(mut g) = state.mailbox_url.lock() {
