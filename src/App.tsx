@@ -11,6 +11,7 @@ import { applyTheme, readTheme, saveTheme, type Theme } from "./theme";
 
 type Phase = "idle" | "hosting" | "joining" | "connected";
 type Mode = "host" | "join";
+type Net = "lan" | "internet";
 
 interface TransferItem { name: string; size: number; }
 interface TransferStart {
@@ -24,7 +25,7 @@ interface Progress {
   direction: "sending" | "receiving";
 }
 interface Toast { id: number; kind: "ok" | "err" | "info"; msg: string; }
-interface AppConfig { downloadDir: string | null; deviceName: string | null; }
+interface AppConfig { downloadDir: string | null; deviceName: string | null; mailboxUrl: string | null; }
 interface DiscoveredPeer { displayName: string; address: string; port: number; }
 interface PairedPayload { peerName: string | null; localName: string | null; }
 
@@ -47,6 +48,7 @@ export default function App() {
 
   const [phase, setPhase] = useState<Phase>("idle");
   const [mode, setMode] = useState<Mode>("host");
+  const [net, setNet] = useState<Net>("lan");
   const [code, setCode] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [liveness, setLiveness] = useState("");
@@ -93,7 +95,7 @@ export default function App() {
 
   const reset = useCallback((msgKey?: string) => {
     setPhase("idle"); setLiveness(""); setTransfer(null); setProgress(null);
-    setTransferDone(false); setCode(""); setPendingTransfer(null);
+    setTransferDone(false); setCode(""); setJoinCode(""); setPendingTransfer(null);
     setPeerChoices(null); setPeerName(null); setLocalName(null);
     speedRef.current = { at: 0, bytes: 0, speed: 0 };
     if (msgKey) pushToast("info", t(msgKey));
@@ -215,14 +217,18 @@ export default function App() {
     try {
       const c = await invoke<string>("generate_code");
       setCode(c); setPhase("hosting");
-      await invoke("host_start", { code: c });
+      await invoke(net === "internet" ? "host_start_internet" : "host_start", { code: c });
     } catch (e) { showError(String(e)); setPhase("idle"); }
-  }, [showError]);
+  }, [net, showError]);
 
   const startJoin = useCallback(async () => {
     if (joinCode.length !== 6) { showError(t("join.error6")); return; }
     setError(null); setPhase("joining"); setPeerChoices(null);
     try {
+      if (net === "internet") {
+        await invoke("join_internet", { code: joinCode });
+        return;
+      }
       const peers = await invoke<DiscoveredPeer[]>("discover_peers");
       if (peers.length === 0) {
         showError(t("err.noPeer"));
@@ -240,7 +246,7 @@ export default function App() {
       }
       setPeerChoices(peers);
     } catch (e) { showError(String(e)); setPhase("idle"); }
-  }, [joinCode, showError, t]);
+  }, [joinCode, net, showError, t]);
 
   const connectToPeer = useCallback(async (peer: DiscoveredPeer) => {
     setPeerChoices(null);
@@ -361,10 +367,22 @@ export default function App() {
                     ))}
                   </div>
 
+                  <div className="flex justify-center gap-1 text-xs">
+                    {(["lan", "internet"] as Net[]).map((n) => (
+                      <button key={n} onClick={() => setNet(n)}
+                        className={`rounded-full px-3 py-1 font-medium transition ${
+                          net === n
+                            ? "bg-sky-400/15 text-sky-200"
+                            : "text-slate-500 hover:text-slate-300"}`}>
+                        {t(`net.${n}`)}
+                      </button>
+                    ))}
+                  </div>
+
                   {mode === "host" ? (
                     <div className="frost-panel rounded-2xl p-6">
                       <p className="mb-2 text-sm font-medium text-sky-50">{t("host.heading")}</p>
-                      <p className="mb-5 text-sm text-slate-400">{t("host.desc")}</p>
+                      <p className="mb-5 text-sm text-slate-400">{t(net === "internet" ? "host.descInternet" : "host.desc")}</p>
                       <button onClick={startHost}
                         className="frost-glow w-full rounded-xl bg-gradient-to-r from-sky-400 via-sky-500 to-cyan-500 px-4 py-3.5 font-medium text-white transition hover:brightness-110 active:scale-[0.99]">
                         {t("host.button")}
@@ -373,7 +391,7 @@ export default function App() {
                   ) : (
                     <div className="frost-panel rounded-2xl p-6">
                       <p className="mb-2 text-sm font-medium text-sky-50">{t("join.heading")}</p>
-                      <p className="mb-5 text-sm text-slate-400">{t("join.desc")}</p>
+                      <p className="mb-5 text-sm text-slate-400">{t(net === "internet" ? "join.descInternet" : "join.desc")}</p>
                       <div className="flex gap-2">
                         <input id="join-code" value={joinCode} aria-label={t("join.heading")}
                           onChange={(e) => setJoinCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
@@ -418,7 +436,7 @@ export default function App() {
                     </div>
                   )}
                   <div className="mt-7 flex justify-center">
-                    <button onClick={() => reset()}
+                    <button onClick={() => { void doDisconnect(); }}
                       className="rounded-lg px-3 py-1.5 text-sm text-slate-400 transition hover:bg-white/5 hover:text-slate-200 active:scale-[0.98]">
                       {t("common.cancel")}
                     </button>
@@ -495,7 +513,7 @@ export default function App() {
 
       {peerChoices && peerChoices.length > 1 && (
         <PeerPickerModal peers={peerChoices} t={t}
-          onPick={connectToPeer} onCancel={() => { setPeerChoices(null); setPhase("idle"); }} />
+          onPick={connectToPeer} onCancel={() => { void doDisconnect(); }} />
       )}
 
       {pendingTransfer && (
@@ -621,6 +639,7 @@ function SettingsModal({ t, lang, setLang, theme, setTheme, config, saveDirLabel
   onError: (e: string) => void; onSaved: () => Promise<void>;
 }) {
   const [name, setName] = useState(config?.deviceName ?? "");
+  const [mailboxUrl, setMailboxUrl] = useState(config?.mailboxUrl ?? "");
 
   // Escape to close
   useEffect(() => {
@@ -632,6 +651,11 @@ function SettingsModal({ t, lang, setLang, theme, setTheme, config, saveDirLabel
   const saveName = async () => {
     if (!name.trim()) return;
     try { await invoke("set_device_name", { name: name.trim() }); await onSaved(); onClose(); }
+    catch (e) { onError(String(e)); }
+  };
+
+  const saveMailboxUrl = async () => {
+    try { await invoke("set_mailbox_url", { url: mailboxUrl.trim() }); await onSaved(); onClose(); }
     catch (e) { onError(String(e)); }
   };
 
@@ -697,6 +721,22 @@ function SettingsModal({ t, lang, setLang, theme, setTheme, config, saveDirLabel
                 {t("settings.deviceNameSave")}
               </button>
             </div>
+          </div>
+
+          <div>
+            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-400">{t("settings.mailboxUrl")}</label>
+            <div className="flex gap-2">
+              <input id="mailbox-url" value={mailboxUrl} aria-label={t("settings.mailboxUrl")}
+                onChange={(e) => setMailboxUrl(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && saveMailboxUrl()}
+                placeholder={t("settings.mailboxUrlPlaceholder")}
+                className="font-mono-num min-w-0 flex-1 rounded-xl border border-sky-300/15 bg-slate-950/50 px-3 py-2.5 text-sm text-sky-50 outline-none transition focus-visible:border-sky-400/60" />
+              <button onClick={saveMailboxUrl}
+                className="shrink-0 rounded-xl bg-sky-400/15 px-4 py-2.5 text-sm font-medium text-sky-100 transition hover:bg-sky-400/25 active:scale-[0.98]">
+                {t("settings.mailboxUrlSave")}
+              </button>
+            </div>
+            <p className="mt-1.5 text-xs text-slate-500">{t("settings.mailboxUrlHint")}</p>
           </div>
 
           <div>
