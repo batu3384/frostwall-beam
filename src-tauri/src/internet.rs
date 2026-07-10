@@ -191,11 +191,19 @@ pub struct Mailbox {
 struct RegisterRequest<'a> {
     code: &'a str,
     endpoint_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_name: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+struct RegisterResponse {
+    token: String,
 }
 
 #[derive(Deserialize)]
 struct LookupResponse {
     endpoint_id: String,
+    device_name: Option<String>,
 }
 
 impl Mailbox {
@@ -206,26 +214,42 @@ impl Mailbox {
         }
     }
 
-    /// Publish `code -> endpoint_id`. The mailbox forgets this after a short TTL.
-    pub async fn register(&self, code: &str, endpoint_id: &str) -> Result<()> {
+    /// Publish `code -> endpoint_id`. Returns a registration token required to
+    /// unregister. The mailbox forgets this after a short TTL.
+    pub async fn register(
+        &self,
+        code: &str,
+        endpoint_id: &str,
+        device_name: Option<&str>,
+    ) -> Result<String> {
         let res = self
             .http
             .post(format!("{}/register", self.base_url))
-            .json(&RegisterRequest { code, endpoint_id })
+            .json(&RegisterRequest {
+                code,
+                endpoint_id,
+                device_name,
+            })
             .send()
             .await
             .map_err(|e| anyhow!("mailbox unreachable: {e}"))?;
         if res.status().is_success() {
-            Ok(())
+            let body: RegisterResponse = res
+                .json()
+                .await
+                .map_err(|e| anyhow!("mailbox returned a malformed response: {e}"))?;
+            Ok(body.token)
+        } else if res.status() == reqwest::StatusCode::CONFLICT {
+            Err(anyhow!("this pairing code is already registered"))
         } else {
             Err(anyhow!("mailbox rejected registration ({})", res.status()))
         }
     }
 
-    /// Poll the mailbox for `code`'s `EndpointId`, tolerating the host not
+    /// Poll the mailbox for `code`'s peer info, tolerating the host not
     /// having registered yet (the two sides don't register/lookup in any
     /// guaranteed order).
-    pub async fn lookup(&self, code: &str) -> Result<String> {
+    pub async fn lookup(&self, code: &str) -> Result<LookupResponse> {
         let deadline = tokio::time::Instant::now() + LOOKUP_TIMEOUT;
         loop {
             let attempt = self
@@ -239,7 +263,7 @@ impl Mailbox {
                         .json()
                         .await
                         .map_err(|e| anyhow!("mailbox returned a malformed response: {e}"))?;
-                    return Ok(body.endpoint_id);
+                    return Ok(body);
                 }
                 Ok(_) | Err(_) => {
                     if tokio::time::Instant::now() >= deadline {

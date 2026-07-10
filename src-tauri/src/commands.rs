@@ -639,18 +639,24 @@ pub async fn host_start_internet(
 
     let ep = internet::host_endpoint().await.map_err(|e| e.to_string())?;
     let mailbox = internet::Mailbox::new(mailbox_url);
-    mailbox
-        .register(&code, &internet::endpoint_id_string(&ep))
+    let host_name = local_display_name(&state);
+    let token = mailbox
+        .register(
+            &code,
+            &internet::endpoint_id_string(&ep),
+            host_name.as_deref(),
+        )
         .await
         .map_err(|e| e.to_string())?;
 
     *state.internet_cleanup.lock().await = Some(InternetCleanup {
         mailbox: mailbox.clone(),
         code: code.clone(),
-        token: None,
+        token: Some(token.clone()),
     });
 
     let app = app.clone();
+    let reg_token = token;
     let handle = async_runtime::spawn(async move {
         // Mirrors host_start's accept loop (see MAX_PAIRING_ATTEMPTS doc
         // there): a stalled or wrong-code handshake doesn't consume the
@@ -666,7 +672,7 @@ pub async fn host_start_internet(
             };
             match session::host_handshake(conn, &code).await {
                 Ok(session) => {
-                    mailbox.unregister(&code, None).await;
+                    mailbox.unregister(&code, Some(&reg_token)).await;
                     if let Some(st) = app.try_state::<AppState>() {
                         st.internet_cleanup.lock().await.take();
                     }
@@ -689,7 +695,7 @@ pub async fn host_start_internet(
                 }
             }
         }
-        mailbox.unregister(&code, None).await;
+        mailbox.unregister(&code, Some(&reg_token)).await;
         if let Some(st) = app.try_state::<AppState>() {
             st.internet_cleanup.lock().await.take();
         }
@@ -792,13 +798,17 @@ pub async fn join_internet(app: AppHandle, state: State<'_, AppState>, code: Str
     let app = app.clone();
     let handle = async_runtime::spawn(async move {
         let mailbox = internet::Mailbox::new(mailbox_url);
-        let endpoint_id = match mailbox.lookup(&code).await {
-            Ok(id) => id,
+        let peer = match mailbox.lookup(&code).await {
+            Ok(peer) => peer,
             Err(e) => {
                 let _ = app.emit(EV_ERROR, e.to_string());
                 return;
             }
         };
+        if let Some(st) = app.try_state::<AppState>() {
+            *st.peer_display_name.lock().await = peer.device_name;
+        }
+        let endpoint_id = peer.endpoint_id;
         let ep = match internet::join_endpoint().await {
             Ok(ep) => ep,
             Err(e) => {

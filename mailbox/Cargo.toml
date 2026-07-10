@@ -1,0 +1,23 @@
+[package]
+name = "frostwall-mailbox"
+version = "0.1.0"
+description = "Tiny rendezvous service: maps a short pairing code to an iroh EndpointId so two Frostwall Beam peers on different networks can find each other. Never sees file contents."
+edition = "2021"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "frostwall-mailbox"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
