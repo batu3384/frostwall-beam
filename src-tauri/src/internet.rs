@@ -201,9 +201,9 @@ struct RegisterResponse {
 }
 
 #[derive(Deserialize)]
-struct LookupResponse {
-    endpoint_id: String,
-    device_name: Option<String>,
+pub struct LookupResponse {
+    pub endpoint_id: String,
+    pub device_name: Option<String>,
 }
 
 impl Mailbox {

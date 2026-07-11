@@ -22,7 +22,6 @@ pub fn run() {
             commands::host_start,
             commands::host_start_internet,
             commands::discover_peers,
-            commands::join,
             commands::join_peer,
             commands::join_internet,
             commands::send_files,

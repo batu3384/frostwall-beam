@@ -28,3 +28,11 @@ export function applyTheme(theme: Theme): void {
     root.setAttribute("data-theme", theme);
   }
 }
+
+/** Re-apply theme when the OS appearance changes (system mode only). */
+export function watchSystemTheme(onChange: () => void): () => void {
+  const mq = window.matchMedia("(prefers-color-scheme: dark)");
+  const handler = () => onChange();
+  mq.addEventListener("change", handler);
+  return () => mq.removeEventListener("change", handler);
+}

@@ -94,6 +94,9 @@ export const translations: Record<Lang, Record<string, string>> = {
     "err.mailboxUnreachable": "Mailbox sunucusuna erişilemiyor.",
     "err.internetEndpointFailed": "İnternet bağlantısı başlatılamadı (ağınızı kontrol edin).",
     "err.internetAcceptTimeout": "Bağlantı için zaman aşımı (kimse katılmadı).",
+    "err.noLanInterface": "Yerel ağ arayüzü bulunamadı — aynı ağa bağlanın veya İnternet modunu kullanın.",
+    "err.tooManyStallAttempts": "Çok fazla takılan eşleşme denemesi — yeni kod üretin.",
+    "err.configPersistFailed": "Ayarlar kaydedilemedi.",
     "err.mailboxUrlInvalid": "Mailbox adresi https:// ile başlamalı.",
     "err.codeAlreadyRegistered": "Bu kod zaten kayıtlı — yeni kod üretin.",
     "connected.peer": "Eş: {name}",
@@ -206,6 +209,9 @@ export const translations: Record<Lang, Record<string, string>> = {
     "err.mailboxUnreachable": "Could not reach the mailbox server.",
     "err.internetEndpointFailed": "Could not start the internet connection (check your network).",
     "err.internetAcceptTimeout": "Timed out waiting for a connection (nobody joined).",
+    "err.noLanInterface": "No LAN interface found — connect to the same network or use Internet mode.",
+    "err.tooManyStallAttempts": "Too many stalled pairing attempts — generate a new code.",
+    "err.configPersistFailed": "Could not save settings.",
     "err.mailboxUrlInvalid": "Mailbox address must use https://.",
     "err.codeAlreadyRegistered": "This code is already registered — generate a new one.",
     "connected.peer": "Peer: {name}",
@@ -260,6 +266,7 @@ export function LangProvider({ children }: { children: React.ReactNode }): React
     } catch {
       // Ignore write failures (storage full / disabled).
     }
+    document.documentElement.lang = lang;
   }, [lang]);
 
   const setLang = useCallback((l: Lang) => {

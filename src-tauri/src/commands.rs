@@ -19,7 +19,7 @@ use crate::crypto::SessionKeys;
 use crate::discovery::{self, Discovery};
 use crate::internet;
 use crate::liveness;
-use crate::protocol::{self, Message};
+use crate::protocol::Message;
 use crate::session::{self, Session};
 use crate::transfer;
 use crate::transport::{self, Connection};
@@ -35,6 +35,8 @@ const EV_ERROR: &str = "frostwall://error";
 /// Max failed pairing handshakes before the host aborts (online brute-force
 /// bound on the 6-digit code).
 const MAX_PAIRING_ATTEMPTS: u32 = 5;
+/// Max stalled handshakes (slowloris bound) before the host gives up.
+const MAX_STALL_ATTEMPTS: u32 = 20;
 
 #[derive(Clone, Serialize)]
 struct TransferItem {
@@ -126,6 +128,12 @@ struct InternetCleanup {
     token: Option<String>,
 }
 
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AppState {
     pub fn new() -> Self {
         let cfg = crate::config::load();
@@ -196,6 +204,46 @@ fn set_in_flight(app: &AppHandle, v: bool) {
             *g = v;
         }
     }
+}
+
+fn try_reserve_transfer(state: &AppState) -> Result<(), String> {
+    let mut g = state
+        .in_flight
+        .lock()
+        .map_err(|_| "not connected".to_string())?;
+    if *g {
+        return Err("a transfer is already in progress".to_string());
+    }
+    *g = true;
+    Ok(())
+}
+
+fn release_transfer(state: &AppState) {
+    if let Ok(mut g) = state.in_flight.lock() {
+        *g = false;
+    }
+}
+
+fn validate_pairing_code(code: &str) -> Result<(), String> {
+    if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
+        return Err("Code must be 6 digits".to_string());
+    }
+    Ok(())
+}
+
+/// Count a failed host handshake toward the pairing budget unless it looks
+/// like a stall (slowloris) — those are tracked separately.
+fn handshake_failure_kind(msg: &str) -> HandshakeFailureKind {
+    if msg.contains("timed out") || msg.contains("peer stalled") {
+        HandshakeFailureKind::Stall
+    } else {
+        HandshakeFailureKind::BadCode
+    }
+}
+
+enum HandshakeFailureKind {
+    Stall,
+    BadCode,
 }
 
 fn downloads_root() -> Option<PathBuf> {
@@ -301,7 +349,13 @@ fn clear_cancel(state: &AppState) {
 
 async fn wait_incoming_decision(state: &AppState) -> bool {
     let (tx, rx) = oneshot::channel();
-    *state.incoming_decision.lock().await = Some(tx);
+    {
+        let mut slot = state.incoming_decision.lock().await;
+        if slot.is_some() {
+            return false;
+        }
+        *slot = Some(tx);
+    }
     rx.await.unwrap_or(false)
 }
 
@@ -346,10 +400,8 @@ async fn run_coordinator(
 
     loop {
         tokio::select! {
-            biased;
             cmd = cmd_rx.recv() => match cmd {
                 Some(SessionCmd::Send { paths, reply }) => {
-                    set_in_flight(&app, true);
                     let cancel = if let Some(st) = app.try_state::<AppState>() {
                         install_cancel(&st)
                     } else {
@@ -562,11 +614,14 @@ pub async fn generate_code() -> String {
 /// online brute-force of the 6-digit code.
 #[tauri::command]
 pub async fn host_start(app: AppHandle, state: State<'_, AppState>, code: String) -> Result<(), String> {
+    validate_pairing_code(&code)?;
     state.clear().await;
 
     let ip = discovery::local_lan_ipv4()
         .map(IpAddr::V4)
-        .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+        .ok_or_else(|| {
+            "no LAN interface found — connect to the same network or use Internet mode".to_string()
+        })?;
     let listener = transport::bind_to(ip, 0).await.map_err(|e| e.to_string())?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
@@ -579,6 +634,7 @@ pub async fn host_start(app: AppHandle, state: State<'_, AppState>, code: String
         // Accept in a loop so a stalled/failed handshake does not consume the
         // only slot; abort after too many wrong-code failures (online brute-force bound).
         let mut bad_code_attempts = 0u32;
+        let mut stall_attempts = 0u32;
         loop {
             let conn = match transport::accept(&listener).await {
                 Ok(c) => c,
@@ -595,17 +651,29 @@ pub async fn host_start(app: AppHandle, state: State<'_, AppState>, code: String
                 }
                 Err(e) => {
                     let msg = e.to_string();
-                    // Slowloris stalls must not exhaust the pairing budget.
-                    if msg.contains("timed out") || msg.contains("peer stalled") {
-                        continue;
-                    }
-                    bad_code_attempts += 1;
-                    if bad_code_attempts >= MAX_PAIRING_ATTEMPTS {
-                        let _ = app.emit(
-                            EV_ERROR,
-                            format!("too many failed pairing attempts ({e}); please regenerate the code"),
-                        );
-                        break;
+                    match handshake_failure_kind(&msg) {
+                        HandshakeFailureKind::Stall => {
+                            stall_attempts += 1;
+                            if stall_attempts >= MAX_STALL_ATTEMPTS {
+                                let _ = app.emit(
+                                    EV_ERROR,
+                                    "too many stalled pairing attempts; please regenerate the code"
+                                        .to_string(),
+                                );
+                                break;
+                            }
+                            continue;
+                        }
+                        HandshakeFailureKind::BadCode => {
+                            bad_code_attempts += 1;
+                            if bad_code_attempts >= MAX_PAIRING_ATTEMPTS {
+                                let _ = app.emit(
+                                    EV_ERROR,
+                                    format!("too many failed pairing attempts ({e}); please regenerate the code"),
+                                );
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -628,6 +696,7 @@ pub async fn host_start_internet(
     state: State<'_, AppState>,
     code: String,
 ) -> Result<(), String> {
+    validate_pairing_code(&code)?;
     state.clear().await;
 
     let mailbox_url = state
@@ -662,6 +731,7 @@ pub async fn host_start_internet(
         // there): a stalled or wrong-code handshake doesn't consume the
         // mailbox registration, only repeated failures do.
         let mut bad_code_attempts = 0u32;
+        let mut stall_attempts = 0u32;
         loop {
             let conn = match internet::accept_one(&ep).await {
                 Ok(c) => c,
@@ -681,16 +751,29 @@ pub async fn host_start_internet(
                 }
                 Err(e) => {
                     let msg = e.to_string();
-                    if msg.contains("timed out") || msg.contains("peer stalled") {
-                        continue;
-                    }
-                    bad_code_attempts += 1;
-                    if bad_code_attempts >= MAX_PAIRING_ATTEMPTS {
-                        let _ = app.emit(
-                            EV_ERROR,
-                            format!("too many failed pairing attempts ({e}); please regenerate the code"),
-                        );
-                        break;
+                    match handshake_failure_kind(&msg) {
+                        HandshakeFailureKind::Stall => {
+                            stall_attempts += 1;
+                            if stall_attempts >= MAX_STALL_ATTEMPTS {
+                                let _ = app.emit(
+                                    EV_ERROR,
+                                    "too many stalled pairing attempts; please regenerate the code"
+                                        .to_string(),
+                                );
+                                break;
+                            }
+                            continue;
+                        }
+                        HandshakeFailureKind::BadCode => {
+                            bad_code_attempts += 1;
+                            if bad_code_attempts >= MAX_PAIRING_ATTEMPTS {
+                                let _ = app.emit(
+                                    EV_ERROR,
+                                    format!("too many failed pairing attempts ({e}); please regenerate the code"),
+                                );
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -732,6 +815,7 @@ pub async fn join_peer(
     port: u16,
     display_name: Option<String>,
 ) -> Result<(), String> {
+    validate_pairing_code(&code)?;
     state.clear().await;
     *state.peer_display_name.lock().await = display_name;
 
@@ -786,6 +870,7 @@ pub async fn join(app: AppHandle, state: State<'_, AppState>, code: String) -> R
 /// NAT allows, transparently relayed otherwise).
 #[tauri::command]
 pub async fn join_internet(app: AppHandle, state: State<'_, AppState>, code: String) -> Result<(), String> {
+    validate_pairing_code(&code)?;
     state.clear().await;
 
     let mailbox_url = state
@@ -838,34 +923,37 @@ pub async fn join_internet(app: AppHandle, state: State<'_, AppState>, code: Str
 /// Send a list of files/folders to the peer.
 #[tauri::command]
 pub async fn send_files(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
-    // Reject if a transfer is already in flight so two sends can't pile up
-    // and reuse the single progress bar confusingly.
-    let in_flight = state
-        .in_flight
-        .lock()
-        .map(|g| *g)
-        .unwrap_or(false);
-    if in_flight {
-        return Err("a transfer is already in progress".to_string());
-    }
+    try_reserve_transfer(&state)?;
     let tx = state
         .cmd_tx
         .lock()
         .await
         .clone()
-        .ok_or_else(|| "not connected".to_string())?;
+        .ok_or_else(|| {
+            release_transfer(&state);
+            "not connected".to_string()
+        })?;
     let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
     let (reply_tx, reply_rx) = oneshot::channel();
-    tx.send(SessionCmd::Send {
-        paths,
-        reply: reply_tx,
-    })
-    .await
-    .map_err(|_| "coordinator stopped".to_string())?;
-    reply_rx
+    if tx
+        .send(SessionCmd::Send {
+            paths,
+            reply: reply_tx,
+        })
         .await
-        .map_err(|_| "session ended (peer disconnected or transfer cancelled)".to_string())?
-        .map_err(|e| e.to_string())
+        .is_err()
+    {
+        release_transfer(&state);
+        return Err("coordinator stopped".to_string());
+    }
+    match reply_rx.await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => {
+            release_transfer(&state);
+            Err("session ended (peer disconnected or transfer cancelled)".to_string())
+        }
+    }
 }
 
 /// Current rotating liveness code, or None if not connected.
@@ -1071,7 +1159,7 @@ mod tests {
     #[tokio::test]
     async fn clear_aborts_pairing_task() {
         let state = AppState::new();
-        let handle = tokio::spawn(async {
+        let handle = async_runtime::spawn(async {
             tokio::time::sleep(Duration::from_secs(60)).await;
         });
         *state.pairing_task.lock().await = Some(handle);

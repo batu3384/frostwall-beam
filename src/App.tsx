@@ -7,7 +7,7 @@ import brand from "./assets/brand.png";
 import { translateError } from "./errors";
 import { appendHistory, loadHistory, type TransferRecord } from "./history";
 import { useI18n, type Lang } from "./i18n";
-import { applyTheme, readTheme, saveTheme, type Theme } from "./theme";
+import { applyTheme, readTheme, saveTheme, watchSystemTheme, type Theme } from "./theme";
 
 type Phase = "idle" | "hosting" | "joining" | "connected";
 type Mode = "host" | "join";
@@ -107,6 +107,11 @@ export default function App() {
     saveTheme(next);
     applyTheme(next);
   }, []);
+
+  useEffect(() => {
+    if (theme !== "system") return;
+    return watchSystemTheme(() => applyTheme("system"));
+  }, [theme]);
 
   const respondPending = useCallback(async (accept: boolean) => {
     try {
@@ -349,7 +354,8 @@ export default function App() {
           <div className="mx-auto flex min-h-full w-full max-w-[560px] items-center justify-center py-4">
             <div className="w-full">
               {error && (
-                <div className="animate-fade-in mb-4 flex items-start gap-2 rounded-xl border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+                <div role="alert" aria-live="assertive"
+                  className="animate-fade-in mb-4 flex items-start gap-2 rounded-xl border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
                   <Icon name="alert" className="mt-0.5 shrink-0 text-rose-300" />
                   <span className="min-w-0 flex-1">{error}</span>
                   <button type="button" onClick={() => setError(null)} aria-label={t("common.dismiss")}
@@ -364,12 +370,12 @@ export default function App() {
                 <div className="animate-fade-in space-y-6">
                   <div className="text-center">
                     <h1 className="text-4xl font-semibold tracking-tight text-ice-gradient">{t("hero.title")}</h1>
-                    <p className="mt-2 text-sm text-slate-400">{t("hero.subtitle")}</p>
+                    <p className="mt-2 text-sm text-muted">{t("hero.subtitle")}</p>
                   </div>
 
                   <div className="frost-panel flex rounded-2xl p-1">
                     {(["host", "join"] as Mode[]).map((m) => (
-                      <button key={m} onClick={() => setMode(m)}
+                      <button key={m} type="button" onClick={() => setMode(m)} aria-pressed={mode === m}
                         className={`flex-1 rounded-xl px-4 py-2.5 text-sm font-medium transition ${
                           mode === m
                             ? "bg-gradient-to-r from-sky-500/90 to-cyan-500/90 text-white shadow-lg shadow-sky-500/20"
@@ -381,7 +387,7 @@ export default function App() {
 
                   <div className="flex justify-center gap-1 text-xs">
                     {(["lan", "internet"] as Net[]).map((n) => (
-                      <button key={n} onClick={() => setNet(n)}
+                      <button key={n} type="button" onClick={() => setNet(n)} aria-pressed={net === n}
                         className={`rounded-full px-3 py-1 font-medium transition ${
                           net === n
                             ? "bg-sky-400/15 text-sky-200"
@@ -394,7 +400,7 @@ export default function App() {
                   {mode === "host" ? (
                     <div className="frost-panel rounded-2xl p-6">
                       <p className="mb-2 text-sm font-medium text-sky-50">{t("host.heading")}</p>
-                      <p className="mb-5 text-sm text-slate-400">{t(net === "internet" ? "host.descInternet" : "host.desc")}</p>
+                      <p className="mb-5 text-sm text-muted">{t(net === "internet" ? "host.descInternet" : "host.desc")}</p>
                       {internetBlocked && (
                         <p className="mb-4 text-sm text-amber-300/90">{t("net.mailboxRequired")}</p>
                       )}
@@ -406,7 +412,7 @@ export default function App() {
                   ) : (
                     <div className="frost-panel rounded-2xl p-6">
                       <p className="mb-2 text-sm font-medium text-sky-50">{t("join.heading")}</p>
-                      <p className="mb-5 text-sm text-slate-400">{t(net === "internet" ? "join.descInternet" : "join.desc")}</p>
+                      <p className="mb-5 text-sm text-muted">{t(net === "internet" ? "join.descInternet" : "join.desc")}</p>
                       {internetBlocked && (
                         <p className="mb-4 text-sm text-amber-300/90">{t("net.mailboxRequired")}</p>
                       )}
@@ -441,7 +447,7 @@ export default function App() {
                       <div className="mt-2 text-xs text-slate-400">
                         {copied ? <span className="text-sky-300">{t("waiting.copied")}</span> : t("waiting.copyHint")}
                       </div>
-                      <p className="mt-6 text-sm text-slate-400">{t("waiting.hostWait")}</p>
+                      <p className="mt-6 text-sm text-muted">{t("waiting.hostWait")}</p>
                     </div>
                   ) : (
                     <div className="flex flex-col items-center gap-5 text-center">
@@ -450,7 +456,7 @@ export default function App() {
                         <span className="absolute inline-flex h-12 w-12 rounded-full bg-cyan-400/10 animate-radar [animation-delay:0.8s]" />
                         <span className="relative h-10 w-10 rounded-full bg-gradient-to-br from-sky-400 to-cyan-500" />
                       </div>
-                      <p className="text-sm text-slate-300">
+                      <p className="text-sm text-muted">
                         {t(net === "internet" ? "join.waitingInternet" : "joining.scanning")}
                       </p>
                     </div>
@@ -550,7 +556,7 @@ export default function App() {
       )}
 
       {/* toasts */}
-      <div className="pointer-events-none absolute bottom-5 left-1/2 z-50 flex max-h-[50vh] -translate-x-1/2 flex-col items-center gap-2 overflow-y-auto">
+      <div aria-live="polite" className="pointer-events-none absolute bottom-5 left-1/2 z-50 flex max-h-[50vh] -translate-x-1/2 flex-col items-center gap-2 overflow-y-auto">
         {toasts.map((to) => (
           <div key={to.id}
             className={`animate-fade-in pointer-events-auto flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm shadow-2xl backdrop-blur-md ${
@@ -685,10 +691,11 @@ function SettingsModal({ t, lang, setLang, theme, setTheme, config, saveDirLabel
   };
 
   return (
-    <div className="absolute inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 p-6 backdrop-blur-sm" onClick={onClose}>
+    <div role="dialog" aria-modal="true" aria-labelledby="settings-title"
+      className="absolute inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 p-6 backdrop-blur-sm" onClick={onClose}>
       <div className="frost-panel animate-fade-in my-auto w-full max-w-md max-h-full overflow-y-auto rounded-2xl p-6" onClick={(e) => e.stopPropagation()}>
         <div className="mb-5 flex items-center justify-between">
-          <h2 className="text-xl font-semibold text-sky-50">{t("settings.title")}</h2>
+          <h2 id="settings-title" className="text-xl font-semibold text-sky-50">{t("settings.title")}</h2>
           <button onClick={onClose} aria-label={t("common.cancel")}
             className="rounded-lg p-1 text-slate-400 transition hover:bg-white/10 hover:text-slate-200 active:scale-95">
             <Icon name="close" />
@@ -794,11 +801,18 @@ function PeerPickerModal({ peers, t, onPick, onCancel }: {
   onPick: (p: DiscoveredPeer) => void;
   onCancel: () => void;
 }) {
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onCancel]);
+
   return (
-    <div className="absolute inset-0 z-[55] flex items-center justify-center overflow-y-auto bg-black/70 p-6 backdrop-blur-sm">
+    <div role="dialog" aria-modal="true" aria-labelledby="peer-picker-title"
+      className="absolute inset-0 z-[55] flex items-center justify-center overflow-y-auto bg-black/70 p-6 backdrop-blur-sm">
       <div className="frost-panel animate-fade-in my-auto w-full max-w-md rounded-2xl p-6">
-        <h2 className="text-xl font-semibold text-sky-50">{t("join.pickPeer")}</h2>
-        <p className="mt-2 text-sm text-slate-400">{t("join.pickPeerDesc")}</p>
+        <h2 id="peer-picker-title" className="text-xl font-semibold text-sky-50">{t("join.pickPeer")}</h2>
+        <p className="mt-2 text-sm text-muted">{t("join.pickPeerDesc")}</p>
         <ul className="mt-4 space-y-2">
           {peers.map((p) => (
             <li key={`${p.address}:${p.port}`}>
@@ -827,11 +841,19 @@ function PendingTransferModal({ transfer, t, formatBytes, onAccept, onReject }: 
   onReject: () => void;
 }) {
   const fileWord = transfer.file_count === 1 ? t("transfer.fileOne") : t("transfer.fileMany");
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === "Escape") onReject(); };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [onReject]);
+
   return (
-    <div className="absolute inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-black/70 p-6 backdrop-blur-sm">
+    <div role="dialog" aria-modal="true" aria-labelledby="pending-transfer-title"
+      className="absolute inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-black/70 p-6 backdrop-blur-sm">
       <div className="frost-panel animate-fade-in my-auto w-full max-w-md max-h-full overflow-y-auto rounded-2xl p-6">
-        <h2 className="text-xl font-semibold text-sky-50">{t("transfer.pending.title")}</h2>
-        <p className="mt-2 text-sm text-slate-400">{t("transfer.pending.desc")}</p>
+        <h2 id="pending-transfer-title" className="text-xl font-semibold text-sky-50">{t("transfer.pending.title")}</h2>
+        <p className="mt-2 text-sm text-muted">{t("transfer.pending.desc")}</p>
         <p className="mt-4 text-xs text-slate-500">{transfer.file_count} {fileWord} · {formatBytes(transfer.total)}</p>
         <div className="mt-3 max-h-40 space-y-1 overflow-auto">
           {transfer.items.map((it, i) => (

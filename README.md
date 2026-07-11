@@ -141,7 +141,10 @@ Pairing code (SPAKE2)  →  session keys (HKDF)  →  encrypted frames (AEAD)
 ```
 
 - Wire protocol is versioned; incompatible peers fail fast.
-- Transfers are **serialized** per session (one direction at a time) to keep UX and state simple.
+- **LAN control plane** (manifest, accept/reject, cancel) is AEAD-encrypted with a session `control_key` derived alongside payload keys — metadata is not sent in plaintext on the local network.
+- **Internet mailbox** must use HTTPS in release builds (plain `http://127.0.0.1` is allowed only for local dev). Registration returns a one-time token; unregister requires that token. First successful register wins for a code (no hijack overwrite).
+- Pairing codes are validated (six digits) and handshake reads are bounded (`HANDSHAKE_TIMEOUT`, stall attempt limits) to resist slowloris-style hangs.
+- Transfers are **serialized** per session (one direction at a time, atomic `in_flight` gate) to keep UX and state simple.
 - Temp files use a `.frostwallpart` suffix and are atomically renamed only after hash verification.
 - Name collisions become `file (1).txt`, `file (2).txt`, … — never silent overwrite.
 - **Transport is not trust** — whether bytes arrive via a direct LAN socket or an `iroh` QUIC path (direct or relayed), pairing and encryption above are identical. The mailbox and any relay only ever see opaque `EndpointId`s / encrypted QUIC traffic, never plaintext, file data, or pairing material.
@@ -187,6 +190,7 @@ cargo test --workspace
 
 # Lint / format (optional)
 cargo fmt --all
+cargo clippy --workspace -- -D warnings
 cargo clippy --workspace -- -D warnings
 ```
 

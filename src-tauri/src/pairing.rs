@@ -67,8 +67,8 @@ impl Pairing {
             Role::B => Spake2::<Ed25519Group>::start_b(&password, &id_a, &id_b),
         };
         // Fresh per-session X25519 keypair for forward secrecy.
-        let mut rng = OsRng;
-        let eph = EphemeralSecret::random_from_rng(&mut rng);
+        let rng = OsRng;
+        let eph = EphemeralSecret::random_from_rng(rng);
         let eph_pub = PublicKey::from(&eph);
 
         let mut wire = msg;
@@ -101,7 +101,7 @@ impl Pairing {
         }
         let peer_pub = PublicKey::from(eph_pub_arr);
         let shared = self.eph.diffie_hellman(&peer_pub);
-        if shared.was_contributory() == false {
+        if !shared.was_contributory() {
             return Err(anyhow!("non-contributory ephemeral exchange"));
         }
 

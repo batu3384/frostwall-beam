@@ -33,7 +33,9 @@ const ERROR_RULES: [string, string][] = [
   ["failed to start internet endpoint", "err.internetEndpointFailed"],
   ["timed out waiting for an internet connection", "err.internetAcceptTimeout"],
   ["internet endpoint closed", "err.internetAcceptTimeout"],
-  ["mailbox URL must use https", "err.mailboxUrlInvalid"],
+  ["no LAN interface found", "err.noLanInterface"],
+  ["too many stalled pairing attempts", "err.tooManyStallAttempts"],
+  ["failed to persist config", "err.configPersistFailed"],
   ["this pairing code is already registered", "err.codeAlreadyRegistered"],
 ];
 

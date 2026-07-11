@@ -76,19 +76,17 @@ async fn recv_or_cancel(
     cancel: &AtomicBool,
     keys: &SessionKeys,
 ) -> Result<Vec<u8>> {
-    loop {
-        tokio::select! {
-            biased;
-            _ = async {
-                while !cancel.load(Ordering::Relaxed) {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            } => {
-                let _ = conn.send(&seal_control(keys, &Message::Cancel)?).await;
-                return Err(anyhow!("transfer cancelled"));
+    tokio::select! {
+        biased;
+        _ = async {
+            while !cancel.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            frame = conn.recv() => return frame.map_err(Into::into),
+        } => {
+            let _ = conn.send(&seal_control(keys, &Message::Cancel)?).await;
+            Err(anyhow!("transfer cancelled"))
         }
+        frame = conn.recv() => frame,
     }
 }
 /// Reject bidi overrides, zero-width, and other control characters in paths.
@@ -410,6 +408,7 @@ pub async fn recv_from_first<F: FnMut(Progress)>(
 /// Receive a single file into `partial`, enforcing the declared `size` cap.
 /// Verifies the Blake3 hash against the `FileEnd`. Returns Err (without
 /// removing the temp — caller handles cleanup) on any failure.
+#[allow(clippy::too_many_arguments)]
 async fn recv_one_file<F: FnMut(Progress)>(
     conn: &mut Connection,
     keys: &SessionKeys,
@@ -427,7 +426,11 @@ async fn recv_one_file<F: FnMut(Progress)>(
     loop {
         check_cancel(cancel)?;
         let bytes = recv_or_cancel(conn, cancel, keys).await?;
-        match protocol::decode(&bytes)? {
+        let msg = match protocol::decode(&bytes)? {
+            Message::Chunk(ct) => Message::Chunk(ct),
+            _ => open_control(keys, &bytes)?,
+        };
+        match msg {
             Message::Chunk(ct) => {
                 let pt = crypto::decrypt_chunk(key, &ct)?;
                 let new_written = written
@@ -598,7 +601,7 @@ mod tests {
     // ---- C1: traversal rejected end-to-end, nothing written outside dest ----
     #[tokio::test]
     async fn recv_rejects_traversal_manifest() {
-        let (mut a, mut b) = loopback_pair().await;
+        let (a, mut b) = loopback_pair().await;
         let keys = SessionKeys::derive(b"shared");
         let dir = tempdir().unwrap();
         let dest = dir.path().join("out");
@@ -616,7 +619,7 @@ mod tests {
     // ---- C3: peer exceeding declared size is aborted ----
     #[tokio::test]
     async fn recv_aborts_size_overrun() {
-        let (mut a, mut b) = loopback_pair().await;
+        let (a, mut b) = loopback_pair().await;
         let keys = SessionKeys::derive(b"shared");
         let dir = tempdir().unwrap();
         let dest = dir.path().join("out");
@@ -642,7 +645,7 @@ mod tests {
     // ---- C2: hash mismatch leaves no file at dest and no partial ----
     #[tokio::test]
     async fn recv_cleans_partial_on_hash_mismatch() {
-        let (mut a, mut b) = loopback_pair().await;
+        let (a, mut b) = loopback_pair().await;
         let keys = SessionKeys::derive(b"shared");
         let dir = tempdir().unwrap();
         let dest = dir.path().join("out");
@@ -667,7 +670,7 @@ mod tests {
     // ---- C3b: peer sending fewer bytes than declared is rejected ----
     #[tokio::test]
     async fn recv_rejects_undersized_file() {
-        let (mut a, mut b) = loopback_pair().await;
+        let (a, mut b) = loopback_pair().await;
         let keys = SessionKeys::derive(b"shared");
         let dir = tempdir().unwrap();
         let dest = dir.path().join("out");

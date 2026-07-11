@@ -78,6 +78,14 @@ body {
   background: var(--bg-shell);
 }
 
+.text-muted {
+  color: color-mix(in srgb, var(--text-body) 62%, transparent);
+}
+
+.text-subtle {
+  color: color-mix(in srgb, var(--text-body) 42%, transparent);
+}
+
 .font-mono-num {
   font-variant-numeric: tabular-nums;
   font-family: "Inter", "SF Mono", "JetBrains Mono", ui-monospace, monospace;

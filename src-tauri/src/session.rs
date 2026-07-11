@@ -24,7 +24,7 @@
 //!   token before the session is established. A wrong code or a terminating
 //!   MITM fails here.
 //! - Each recv() is bounded by `HANDSHAKE_TIMEOUT` (slowloris defense).
-//! Reordering any step deadlocks the handshake with no further error.
+//!   Reordering any step deadlocks the handshake with no further error.
 
 use std::time::Duration;
 
