@@ -24,10 +24,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo test (workspace: app + mailbox)
+      - name: "cargo test (workspace: app + mailbox)"
         run: cargo test --workspace
 
-      - name: cargo clippy (workspace, deny warnings)
+      - name: "cargo clippy (workspace, deny warnings)"
         run: cargo clippy --workspace -- -D warnings
 
   frontend:
