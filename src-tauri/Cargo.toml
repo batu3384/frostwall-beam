@@ -46,6 +46,11 @@ blake3 = "1"
 # LAN discovery
 mdns-sd = "0.20"
 
+# Internet transport: NAT traversal + relay fallback (iroh), and an HTTP
+# client to talk to the mailbox rendezvous service (reqwest).
+iroh = "1.0.1"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+
 # utils
 anyhow = "1"
 thiserror = "2"

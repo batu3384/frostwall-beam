@@ -10,11 +10,16 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// User-tunable settings. Both fields optional: unset means "use defaults".
+/// User-tunable settings. All fields optional: unset means "use defaults".
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserConfig {
     pub download_dir: Option<String>,
     pub device_name: Option<String>,
+    /// Base URL of the mailbox rendezvous service used for internet (non-LAN)
+    /// sessions, e.g. `https://mailbox.example.com`. Unset => internet mode
+    /// is unavailable until the user configures one (see README: deploying
+    /// the `frostwall-mailbox` service).
+    pub mailbox_url: Option<String>,
 }
 
 /// Canonical config file: `<config_dir>/frostwall/config.json`.
@@ -116,6 +121,7 @@ mod tests {
         let cfg = UserConfig {
             download_dir: Some("/some/where".to_string()),
             device_name: Some("laptop".to_string()),
+            mailbox_url: Some("https://mailbox.example.com".to_string()),
         };
         save_at(&path, &cfg).expect("save");
         let loaded = load_at(&path);
@@ -131,6 +137,7 @@ mod tests {
         let cfg = UserConfig {
             download_dir: Some("/x".to_string()),
             device_name: None,
+            mailbox_url: None,
         };
         save_at(&path, &cfg).expect("save");
         assert!(path.exists(), "config file should exist after save");
@@ -146,6 +153,7 @@ mod tests {
         let cfg = UserConfig {
             download_dir: Some("/attacker".to_string()),
             device_name: None,
+            mailbox_url: None,
         };
         save_at(&real, &cfg).expect("save real");
         let link = dir.path().join("config.json");

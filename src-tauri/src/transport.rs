@@ -1,19 +1,31 @@
-//! Transport: a framed, length-delimited TCP connection. Each logical
-//! message on the wire is `4-byte big-endian length || payload`. Encryption
-//! is layered on top by the transfer/protocol modules — this is just the
+//! Transport: a framed, length-delimited connection. Each logical message
+//! on the wire is `4-byte big-endian length || payload`. Encryption is
+//! layered on top by the transfer/protocol modules — this is just the
 //! reliable byte-pipe plus framing.
+//!
+//! [`Connection`] is transport-agnostic: it wraps anything that is an
+//! `AsyncRead + AsyncWrite` byte stream behind one boxed trait object, so
+//! the same handshake/transfer code in `session.rs`/`transfer.rs` works
+//! whether the underlying pipe is a plain LAN TCP socket ([`connect`] /
+//! [`accept`]) or an iroh QUIC stream pair for internet sessions (see
+//! `internet.rs`, which builds a `Connection` via [`Connection::from_io`]).
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 /// Largest single framed message we will accept (1 MiB — comfortably above
 /// our 256 KiB encrypted file chunks).
 pub const MAX_FRAME: usize = 1 << 20;
+
+/// Anything that can back a [`Connection`]: a duplex byte stream.
+pub trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Duplex for T {}
 
 /// Bind a TCP listener on a specific interface IP (avoids exposing the
 /// listener on every interface / untrusted networks). Port 0 => OS picks.
@@ -29,35 +41,37 @@ pub async fn bind(port: u16) -> Result<TcpListener> {
     bind_to(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port).await
 }
 
-/// Connect to a peer and return a framed connection.
+/// Connect to a peer over LAN TCP and return a framed connection.
 pub async fn connect(addr: SocketAddr) -> Result<Connection> {
     let stream = TcpStream::connect(addr)
         .await
         .map_err(|e| anyhow!("connect: {e}"))?;
-    Ok(Connection::from_stream(stream))
+    Ok(Connection::from_io(stream))
 }
 
-/// Accept an inbound connection on a listener.
+/// Accept an inbound LAN TCP connection on a listener.
 pub async fn accept(listener: &TcpListener) -> Result<Connection> {
     let (stream, _peer) = listener
         .accept()
         .await
         .map_err(|e| anyhow!("accept: {e}"))?;
-    Ok(Connection::from_stream(stream))
+    Ok(Connection::from_io(stream))
 }
 
-/// A length-delimited TCP connection.
+/// A length-delimited connection over any duplex byte stream.
 pub struct Connection {
-    framed: Framed<TcpStream, LengthDelimitedCodec>,
+    framed: Framed<Box<dyn Duplex>, LengthDelimitedCodec>,
 }
 
 impl Connection {
-    fn from_stream(stream: TcpStream) -> Self {
+    /// Wrap any `AsyncRead + AsyncWrite` stream (TCP, or an iroh stream pair
+    /// joined via `tokio::io::join`) into a framed [`Connection`].
+    pub fn from_io<IO: Duplex + 'static>(io: IO) -> Self {
         let codec = LengthDelimitedCodec::builder()
             .max_frame_length(MAX_FRAME)
             .new_codec();
         Connection {
-            framed: Framed::new(stream, codec),
+            framed: Framed::new(Box::new(io), codec),
         }
     }
 

@@ -3,6 +3,7 @@ pub mod commands;
 pub mod config;
 pub mod crypto;
 pub mod discovery;
+pub mod internet;
 pub mod liveness;
 pub mod pairing;
 pub mod protocol;
@@ -19,9 +20,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::generate_code,
             commands::host_start,
+            commands::host_start_internet,
             commands::discover_peers,
             commands::join,
             commands::join_peer,
+            commands::join_internet,
             commands::send_files,
             commands::cancel_transfer,
             commands::current_liveness_code,
@@ -30,6 +33,7 @@ pub fn run() {
             commands::get_config,
             commands::set_download_dir,
             commands::set_device_name,
+            commands::set_mailbox_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
