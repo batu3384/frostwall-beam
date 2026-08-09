@@ -16,10 +16,32 @@ pub struct UserConfig {
     pub download_dir: Option<String>,
     pub device_name: Option<String>,
     /// Base URL of the mailbox rendezvous service used for internet (non-LAN)
-    /// sessions, e.g. `https://mailbox.example.com`. Unset => internet mode
-    /// is unavailable until the user configures one (see README: deploying
-    /// the `frostwall-mailbox` service).
+    /// sessions. When unset, the app uses a built-in default (local sidecar in
+    /// dev, or `FROSTWALL_MAILBOX_URL` at compile time for release).
     pub mailbox_url: Option<String>,
+}
+
+/// True when a real (non-localhost-only) rendezvous URL is configured.
+pub fn remote_mailbox_configured(stored: &Option<String>) -> bool {
+    if stored.as_ref().is_some_and(|s| !s.trim().is_empty()) {
+        return true;
+    }
+    option_env!("FROSTWALL_MAILBOX_URL").is_some_and(|u| !u.is_empty())
+}
+
+/// Resolve a configured mailbox URL (user override → build-time). No localhost fallback.
+pub fn configured_mailbox_url(stored: &Option<String>) -> Option<String> {
+    if let Some(url) = stored.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        return Some(url.to_string());
+    }
+    option_env!("FROSTWALL_MAILBOX_URL")
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+}
+
+/// Start the embedded localhost mailbox only when no remote URL is configured.
+pub fn should_spawn_local_mailbox(stored: &Option<String>) -> bool {
+    !remote_mailbox_configured(stored)
 }
 
 /// Canonical config file: `<config_dir>/frostwall/config.json`.
@@ -103,6 +125,26 @@ fn save_at(path: &Path, cfg: &UserConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_mailbox_url_prefers_stored() {
+        let stored = Some("https://custom.example.com".to_string());
+        assert_eq!(
+            configured_mailbox_url(&stored).as_deref(),
+            Some("https://custom.example.com")
+        );
+    }
+
+    #[test]
+    fn configured_mailbox_url_none_when_unset() {
+        assert!(configured_mailbox_url(&None).is_none());
+    }
+
+    #[test]
+    fn remote_mailbox_configured_when_stored() {
+        assert!(remote_mailbox_configured(&Some("https://x.example".into())));
+        assert!(!remote_mailbox_configured(&None));
+    }
 
     #[test]
     fn load_missing_returns_default() {

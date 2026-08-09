@@ -24,6 +24,24 @@ use crate::session::{self, Session};
 use crate::transfer;
 use crate::transport::{self, Connection};
 
+async fn resolve_mailbox_url_async(state: &AppState) -> Result<String, String> {
+    let stored = state
+        .mailbox_url
+        .lock()
+        .map(|g| g.clone())
+        .ok()
+        .flatten();
+    if let Some(url) = crate::config::configured_mailbox_url(&stored) {
+        return Ok(url);
+    }
+    if crate::config::should_spawn_local_mailbox(&stored) {
+        return crate::mailbox_sidecar::ensure_embedded()
+            .await
+            .ok_or_else(|| "could not start local rendezvous service".to_string());
+    }
+    Err("remote pairing is not available".to_string())
+}
+
 const EV_PROGRESS: &str = "frostwall://progress";
 const EV_TRANSFER_START: &str = "frostwall://transfer-start";
 const EV_TRANSFER_PENDING: &str = "frostwall://transfer-pending";
@@ -82,6 +100,7 @@ pub struct ConfigPayload {
     pub download_dir: Option<String>,
     pub device_name: Option<String>,
     pub mailbox_url: Option<String>,
+    pub remote_available: bool,
 }
 
 enum SessionCmd {
@@ -699,13 +718,7 @@ pub async fn host_start_internet(
     validate_pairing_code(&code)?;
     state.clear().await;
 
-    let mailbox_url = state
-        .mailbox_url
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or(None)
-        .ok_or_else(|| "mailbox server is not configured".to_string())?;
-
+    let mailbox_url = resolve_mailbox_url_async(&state).await?;
     let ep = internet::host_endpoint().await.map_err(|e| e.to_string())?;
     let mailbox = internet::Mailbox::new(mailbox_url);
     let host_name = local_display_name(&state);
@@ -873,12 +886,7 @@ pub async fn join_internet(app: AppHandle, state: State<'_, AppState>, code: Str
     validate_pairing_code(&code)?;
     state.clear().await;
 
-    let mailbox_url = state
-        .mailbox_url
-        .lock()
-        .map(|g| g.clone())
-        .unwrap_or(None)
-        .ok_or_else(|| "mailbox server is not configured".to_string())?;
+    let mailbox_url = resolve_mailbox_url_async(&state).await?;
 
     let app = app.clone();
     let handle = async_runtime::spawn(async move {
@@ -1040,10 +1048,12 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<ConfigPayload, Str
         .map(|g| g.clone())
         .ok()
         .flatten();
+    let remote_available = crate::config::remote_mailbox_configured(&mailbox_url);
     Ok(ConfigPayload {
         download_dir,
         device_name,
         mailbox_url,
+        remote_available,
     })
 }
 

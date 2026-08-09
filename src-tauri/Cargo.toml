@@ -50,6 +50,7 @@ mdns-sd = "0.20"
 # client to talk to the mailbox rendezvous service (reqwest).
 iroh = "1.0.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
+frostwall-mailbox = { path = "../mailbox" }
 
 # utils
 anyhow = "1"

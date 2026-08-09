@@ -4,6 +4,12 @@
   color-scheme: dark light;
   --bg-body: #05080f;
   --text-body: #e6f4fe;
+  --text-heading: #f0f9ff;
+  --text-secondary: #cbd5e1;
+  --text-accent: #7dd3fc;
+  --text-accent-strong: #e0f2fe;
+  --bg-input: rgba(2, 6, 23, 0.5);
+  --border-input: rgba(125, 211, 252, 0.15);
   --bg-shell: radial-gradient(120% 80% at 50% -20%, rgba(56,189,248,0.16), transparent 60%),
     radial-gradient(80% 60% at 90% 110%, rgba(34,211,238,0.10), transparent 60%),
     linear-gradient(180deg, #060b16 0%, #05080f 60%, #04060c 100%);
@@ -19,13 +25,25 @@
 
 [data-theme="dark"] {
   color-scheme: dark;
+  --text-heading: #f0f9ff;
+  --text-secondary: #cbd5e1;
+  --text-accent: #7dd3fc;
+  --text-accent-strong: #e0f2fe;
+  --bg-input: rgba(2, 6, 23, 0.5);
+  --border-input: rgba(125, 211, 252, 0.15);
 }
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
     color-scheme: light;
-    --bg-body: #f0f9ff;
+    --bg-body: #0c4a6e;
     --text-body: #0c4a6e;
+    --text-heading: #082f49;
+    --text-secondary: #0369a1;
+    --text-accent: #0284c7;
+    --text-accent-strong: #075985;
+    --bg-input: rgba(255, 255, 255, 0.85);
+    --border-input: rgba(14, 165, 233, 0.28);
     --bg-shell: radial-gradient(120% 80% at 50% -20%, rgba(56,189,248,0.12), transparent 60%),
       radial-gradient(80% 60% at 90% 110%, rgba(34,211,238,0.08), transparent 60%),
       linear-gradient(180deg, #e0f2fe 0%, #f0f9ff 60%, #ecfeff 100%);
@@ -42,8 +60,14 @@
 
 [data-theme="light"] {
   color-scheme: light;
-  --bg-body: #f0f9ff;
+  --bg-body: #0c4a6e;
   --text-body: #0c4a6e;
+  --text-heading: #082f49;
+  --text-secondary: #0369a1;
+  --text-accent: #0284c7;
+  --text-accent-strong: #075985;
+  --bg-input: rgba(255, 255, 255, 0.85);
+  --border-input: rgba(14, 165, 233, 0.28);
   --bg-shell: radial-gradient(120% 80% at 50% -20%, rgba(56,189,248,0.12), transparent 60%),
     radial-gradient(80% 60% at 90% 110%, rgba(34,211,238,0.08), transparent 60%),
     linear-gradient(180deg, #e0f2fe 0%, #f0f9ff 60%, #ecfeff 100%);
@@ -84,6 +108,30 @@ body {
 
 .text-subtle {
   color: color-mix(in srgb, var(--text-body) 42%, transparent);
+}
+
+.text-heading {
+  color: var(--text-heading);
+}
+
+.text-secondary {
+  color: var(--text-secondary);
+}
+
+.text-accent {
+  color: var(--text-accent);
+}
+
+.text-accent-strong {
+  color: var(--text-accent-strong);
+}
+
+.bg-input {
+  background: var(--bg-input);
+}
+
+.border-input {
+  border-color: var(--border-input);
 }
 
 .font-mono-num {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -25,11 +25,38 @@ interface Progress {
   direction: "sending" | "receiving";
 }
 interface Toast { id: number; kind: "ok" | "err" | "info"; msg: string; }
-interface AppConfig { downloadDir: string | null; deviceName: string | null; mailboxUrl: string | null; }
+interface AppConfig { downloadDir: string | null; deviceName: string | null; mailboxUrl: string | null; remoteAvailable: boolean; }
 interface DiscoveredPeer { displayName: string; address: string; port: number; }
 interface PairedPayload { peerName: string | null; localName: string | null; }
 
 const STEP = 30;
+
+function useFocusTrap(active: boolean, containerRef: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    if (!active || !containerRef.current) return;
+    const root = containerRef.current;
+    const selector = 'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const focusable = () => Array.from(root.querySelectorAll<HTMLElement>(selector));
+    const first = () => focusable()[0];
+    first()?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const nodes = focusable();
+      if (nodes.length === 0) return;
+      const f = nodes[0];
+      const l = nodes[nodes.length - 1];
+      if (e.shiftKey && document.activeElement === f) {
+        e.preventDefault();
+        l.focus();
+      } else if (!e.shiftKey && document.activeElement === l) {
+        e.preventDefault();
+        f.focus();
+      }
+    };
+    root.addEventListener("keydown", onKey);
+    return () => root.removeEventListener("keydown", onKey);
+  }, [active, containerRef]);
+}
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -93,6 +120,12 @@ export default function App() {
   const refreshConfig = useCallback(async () => {
     try { setConfig(await invoke<AppConfig>("get_config")); } catch { /* ignore */ }
   }, []);
+
+  useEffect(() => {
+    if (config && !config.remoteAvailable && net === "internet") {
+      setNet("lan");
+    }
+  }, [config, net]);
 
   const reset = useCallback((msgKey?: string) => {
     setPhase("idle"); setLiveness(""); setTransfer(null); setProgress(null);
@@ -222,23 +255,15 @@ export default function App() {
 
   const startHost = useCallback(async () => {
     setError(null);
-    if (net === "internet" && !config?.mailboxUrl?.trim()) {
-      showError(t("err.mailboxNotConfigured"));
-      return;
-    }
     try {
       const c = await invoke<string>("generate_code");
       setCode(c); setPhase("hosting");
       await invoke(net === "internet" ? "host_start_internet" : "host_start", { code: c });
     } catch (e) { showError(String(e)); setPhase("idle"); }
-  }, [net, showError, config?.mailboxUrl]);
+  }, [net, showError]);
 
   const startJoin = useCallback(async () => {
     if (joinCode.length !== 6) { showError(t("join.error6")); return; }
-    if (net === "internet" && !config?.mailboxUrl?.trim()) {
-      showError(t("err.mailboxNotConfigured"));
-      return;
-    }
     setError(null); setPhase("joining"); setPeerChoices(null);
     try {
       if (net === "internet") {
@@ -262,7 +287,7 @@ export default function App() {
       }
       setPeerChoices(peers);
     } catch (e) { showError(String(e)); setPhase("idle"); }
-  }, [joinCode, net, showError, t, config?.mailboxUrl]);
+  }, [joinCode, net, showError, t]);
 
   const connectToPeer = useCallback(async (peer: DiscoveredPeer) => {
     setPeerChoices(null);
@@ -320,9 +345,8 @@ export default function App() {
   }, [refreshConfig, pushToast, showError, t]);
 
   const saveDirLabel = config?.downloadDir ?? t("settings.saveDirDefault");
+  const remoteAvailable = config?.remoteAvailable ?? false;
 
-  const mailboxReady = Boolean(config?.mailboxUrl?.trim());
-  const internetBlocked = net === "internet" && !mailboxReady;
   const busy = phase === "hosting" || phase === "joining";
   const eta = progress && speed > 0 ? Math.ceil((progress.total - progress.transferred) / speed) : 0;
   const pct = progress ? progress.percent : 0;
@@ -341,7 +365,7 @@ export default function App() {
               style={{ filter: "drop-shadow(0 2px 8px rgba(56,189,248,0.22))" }} />
             <div className="flex shrink-0 items-center gap-2">
               <button onClick={() => setShowSettings(true)} title={t("settings.title")} aria-label={t("settings.title")}
-                className="frost-panel flex h-8 w-8 items-center justify-center rounded-full text-slate-300 transition hover:text-sky-200">
+                className="frost-panel flex h-11 w-11 items-center justify-center rounded-full text-secondary transition hover:text-accent">
                 <Icon name="gear" />
               </button>
               <StatusPill phase={phase} t={t} />
@@ -359,7 +383,7 @@ export default function App() {
                   <Icon name="alert" className="mt-0.5 shrink-0 text-rose-300" />
                   <span className="min-w-0 flex-1">{error}</span>
                   <button type="button" onClick={() => setError(null)} aria-label={t("common.dismiss")}
-                    className="shrink-0 rounded-lg p-1 text-rose-300/80 transition hover:bg-rose-500/20 hover:text-rose-100">
+                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-rose-300/80 transition hover:bg-rose-500/20 hover:text-rose-100">
                     <Icon name="close" />
                   </button>
                 </div>
@@ -376,53 +400,49 @@ export default function App() {
                   <div className="frost-panel flex rounded-2xl p-1">
                     {(["host", "join"] as Mode[]).map((m) => (
                       <button key={m} type="button" onClick={() => setMode(m)} aria-pressed={mode === m}
-                        className={`flex-1 rounded-xl px-4 py-2.5 text-sm font-medium transition ${
+                        className={`flex-1 min-h-11 rounded-xl px-4 py-2.5 text-sm font-medium transition ${
                           mode === m
                             ? "bg-gradient-to-r from-sky-500/90 to-cyan-500/90 text-white shadow-lg shadow-sky-500/20"
-                            : "text-slate-400 hover:bg-white/5 hover:text-slate-200 active:scale-[0.97]"}`}>
+                            : "text-muted hover:bg-white/5 hover:text-secondary active:scale-[0.97]"}`}>
                         {t(`mode.${m}`)}
                       </button>
                     ))}
                   </div>
 
+                  {remoteAvailable && (
                   <div className="flex justify-center gap-1 text-xs">
                     {(["lan", "internet"] as Net[]).map((n) => (
                       <button key={n} type="button" onClick={() => setNet(n)} aria-pressed={net === n}
-                        className={`rounded-full px-3 py-1 font-medium transition ${
+                        className={`min-h-11 rounded-full px-4 py-2.5 font-medium transition ${
                           net === n
-                            ? "bg-sky-400/15 text-sky-200"
-                            : "text-slate-500 hover:text-slate-300"}`}>
+                            ? "bg-sky-400/15 text-accent-strong"
+                            : "text-subtle hover:text-secondary"}`}>
                         {t(`net.${n}`)}
                       </button>
                     ))}
                   </div>
+                  )}
 
                   {mode === "host" ? (
                     <div className="frost-panel rounded-2xl p-6">
-                      <p className="mb-2 text-sm font-medium text-sky-50">{t("host.heading")}</p>
+                      <p className="mb-2 text-sm font-medium text-heading">{t("host.heading")}</p>
                       <p className="mb-5 text-sm text-muted">{t(net === "internet" ? "host.descInternet" : "host.desc")}</p>
-                      {internetBlocked && (
-                        <p className="mb-4 text-sm text-amber-300/90">{t("net.mailboxRequired")}</p>
-                      )}
-                      <button onClick={startHost} disabled={internetBlocked}
+                      <button onClick={startHost}
                         className="frost-glow w-full rounded-xl bg-gradient-to-r from-sky-400 via-sky-500 to-cyan-500 px-4 py-3.5 font-medium text-white transition enabled:hover:brightness-110 active:scale-[0.99] disabled:opacity-40">
                         {t("host.button")}
                       </button>
                     </div>
                   ) : (
                     <div className="frost-panel rounded-2xl p-6">
-                      <p className="mb-2 text-sm font-medium text-sky-50">{t("join.heading")}</p>
+                      <p className="mb-2 text-sm font-medium text-heading">{t("join.heading")}</p>
                       <p className="mb-5 text-sm text-muted">{t(net === "internet" ? "join.descInternet" : "join.desc")}</p>
-                      {internetBlocked && (
-                        <p className="mb-4 text-sm text-amber-300/90">{t("net.mailboxRequired")}</p>
-                      )}
                       <div className="flex gap-2">
                         <input id="join-code" value={joinCode} aria-label={t("join.heading")}
                           onChange={(e) => setJoinCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
                           onKeyDown={(e) => e.key === "Enter" && startJoin()}
                           inputMode="numeric" placeholder="••••••"
-                          className="font-mono-num min-w-0 flex-1 rounded-xl border border-sky-300/15 bg-slate-950/50 px-4 py-3.5 text-center text-2xl tracking-[0.45em] text-sky-50 outline-none transition focus-visible:border-sky-400/60" />
-                        <button onClick={startJoin} disabled={joinCode.length !== 6 || internetBlocked}
+                          className="font-mono-num min-w-0 flex-1 rounded-xl border border-input bg-input px-4 py-3.5 text-center text-2xl tracking-[0.45em] text-heading outline-none transition focus-visible:border-sky-400/60" />
+                        <button onClick={startJoin} disabled={joinCode.length !== 6}
                           className="frost-glow shrink-0 rounded-xl bg-gradient-to-r from-sky-400 via-sky-500 to-cyan-500 px-6 py-3.5 font-medium text-white transition enabled:hover:brightness-110 active:scale-[0.99] disabled:opacity-40">
                           {t("join.button")}
                         </button>
@@ -438,14 +458,14 @@ export default function App() {
                 <div className="animate-fade-in frost-panel relative overflow-hidden rounded-2xl p-8">
                   {phase === "hosting" ? (
                     <div className="flex flex-col items-center gap-1.5 text-center">
-                      <p className="text-xs font-medium uppercase tracking-[0.25em] text-sky-300/80">{t("waiting.codeLabel")}</p>
+                      <p className="text-xs font-medium uppercase tracking-[0.25em] text-accent/80">{t("waiting.codeLabel")}</p>
                       <button onClick={copyCode} title={t("waiting.copyHint")}
-                        className="font-mono-num group relative mt-3 rounded-2xl text-6xl font-semibold tracking-[0.3em] text-sky-50 transition hover:scale-[1.02] active:scale-[0.98]">
+                        className="font-mono-num group relative mt-3 rounded-2xl text-6xl font-semibold tracking-[0.3em] text-heading transition hover:scale-[1.02] active:scale-[0.98]">
                         {code}
                         <span className="absolute -inset-4 -z-10 rounded-3xl bg-sky-400/10 blur-2xl transition group-hover:bg-sky-400/20" />
                       </button>
-                      <div className="mt-2 text-xs text-slate-400">
-                        {copied ? <span className="text-sky-300">{t("waiting.copied")}</span> : t("waiting.copyHint")}
+                      <div className="mt-2 text-xs text-muted">
+                        {copied ? <span className="text-accent">{t("waiting.copied")}</span> : t("waiting.copyHint")}
                       </div>
                       <p className="mt-6 text-sm text-muted">{t("waiting.hostWait")}</p>
                     </div>
@@ -463,7 +483,7 @@ export default function App() {
                   )}
                   <div className="mt-7 flex justify-center">
                     <button onClick={() => { void doDisconnect(); }}
-                      className="rounded-lg px-3 py-1.5 text-sm text-slate-400 transition hover:bg-white/5 hover:text-slate-200 active:scale-[0.98]">
+                      className="min-h-11 rounded-lg px-4 py-2.5 text-sm text-muted transition hover:bg-white/5 hover:text-secondary active:scale-[0.98]">
                       {t("common.cancel")}
                     </button>
                   </div>
@@ -482,16 +502,16 @@ export default function App() {
                         </span>
                         {t("connected.secure")}
                       </div>
-                      <span className="text-xs text-slate-400">{t("connected.rotates").replace("{n}", String(secLeft))}</span>
+                      <span className="text-xs text-muted">{t("connected.rotates").replace("{n}", String(secLeft))}</span>
                     </div>
-                    <div className="mt-4 min-w-0 break-all font-mono-num text-4xl font-semibold tracking-[0.35em] text-sky-50">{liveness}</div>
+                    <div className="mt-4 min-w-0 break-all font-mono-num text-4xl font-semibold tracking-[0.35em] text-heading">{liveness}</div>
                     <div className="mt-4 h-1 w-full overflow-hidden rounded-full bg-white/5">
                       <div className="h-full rounded-full bg-gradient-to-r from-sky-400 to-cyan-400 transition-[width] duration-1000 ease-linear"
                         style={{ width: `${(secLeft / STEP) * 100}%` }} />
                     </div>
-                    <p className="mt-3 text-xs text-slate-400">{t("connected.codeHint")}</p>
+                    <p className="mt-3 text-xs text-muted">{t("connected.codeHint")}</p>
                     {(peerName || localName) && (
-                      <div className="mt-4 space-y-1 border-t border-sky-300/10 pt-3 text-xs text-slate-400">
+                      <div className="mt-4 space-y-1 border-t border-sky-300/10 pt-3 text-xs text-muted">
                         {localName && <p>{t("connected.you").replace("{name}", localName)}</p>}
                         <p>{peerName
                           ? t("connected.peer").replace("{name}", peerName)
@@ -508,26 +528,26 @@ export default function App() {
                       className={`relative flex flex-col items-center justify-center rounded-2xl border-2 border-dashed p-10 text-center transition ${
                         dragging ? "border-sky-400/70 bg-sky-400/10" : "border-sky-300/25 bg-white/[0.05]"}`}>
                       <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-sky-400/10">
-                        <Icon name="upload" className="text-sky-300" />
+                        <Icon name="upload" className="text-accent" />
                       </div>
-                      <p className="text-sm text-slate-200">{t("drop.hint")}</p>
-                      <p className="mb-4 mt-0.5 text-xs text-slate-500">{t("drop.or")}</p>
+                      <p className="text-sm text-secondary">{t("drop.hint")}</p>
+                      <p className="mb-4 mt-0.5 text-xs text-subtle">{t("drop.or")}</p>
                       <div className="flex gap-2">
                         <button onClick={pickFiles}
                           className="frost-glow rounded-xl bg-gradient-to-r from-sky-400 via-sky-500 to-cyan-500 px-4 py-2.5 text-sm font-medium text-white transition hover:brightness-110 active:scale-[0.98]">
                           {t("drop.files")}
                         </button>
                         <button onClick={pickFolder}
-                          className="rounded-xl border border-sky-300/15 bg-white/[0.06] px-4 py-2.5 text-sm font-medium text-sky-100 transition hover:bg-white/[0.10] active:scale-[0.98]">
+                          className="rounded-xl border border-sky-300/15 bg-white/[0.06] px-4 py-2.5 text-sm font-medium text-accent-strong transition hover:bg-white/[0.10] active:scale-[0.98]">
                           {t("drop.folder")}
                         </button>
                       </div>
-                      <p className="mt-5 max-w-full truncate text-xs text-slate-400" title={saveDirLabel}>↧ {saveDirLabel}</p>
+                      <p className="mt-5 max-w-full truncate text-xs text-muted" title={saveDirLabel}>↧ {saveDirLabel}</p>
                     </div>
                   )}
 
                   <button onClick={doDisconnect}
-                    className="w-full rounded-xl border border-sky-300/15 bg-white/[0.04] px-4 py-3 text-sm font-medium text-slate-300 transition hover:bg-white/[0.08] hover:text-rose-200 active:scale-[0.99]">
+                    className="w-full rounded-xl border border-sky-300/15 bg-white/[0.04] px-4 py-3 text-sm font-medium text-secondary transition hover:bg-white/[0.08] hover:text-rose-200 active:scale-[0.99]">
                     {t("btn.disconnect")}
                   </button>
                 </div>
@@ -562,7 +582,7 @@ export default function App() {
             className={`animate-fade-in pointer-events-auto flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm shadow-2xl backdrop-blur-md ${
               to.kind === "ok" ? "border-emerald-400/25 bg-emerald-500/15 text-emerald-100"
               : to.kind === "err" ? "border-rose-400/25 bg-rose-500/15 text-rose-100"
-              : "border-sky-300/20 bg-sky-500/15 text-sky-100"}`}>
+              : "border-sky-300/20 bg-sky-500/15 text-accent-strong"}`}>
             <Icon name={to.kind === "ok" ? "check" : to.kind === "err" ? "alert" : "info"} className="shrink-0 opacity-90" />
             {to.msg}
           </div>
@@ -576,7 +596,7 @@ export default function App() {
 
 function StatusPill({ phase, t }: { phase: Phase; t: (k: string) => string }) {
   const map: Record<Phase, { key: string; dot: string; text: string }> = {
-    idle: { key: "status.offline", dot: "bg-slate-500", text: "text-slate-400" },
+    idle: { key: "status.offline", dot: "bg-slate-500", text: "text-muted" },
     hosting: { key: "status.hosting", dot: "bg-amber-400", text: "text-amber-200" },
     joining: { key: "status.connecting", dot: "bg-amber-400", text: "text-amber-200" },
     connected: { key: "status.encrypted", dot: "bg-emerald-400", text: "text-emerald-200" },
@@ -601,33 +621,33 @@ function TransferCard({ transfer, progress, pct, speed, eta, done, t, onCancel }
     <div className="frost-panel rounded-2xl p-6">
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <span className={`flex h-7 w-7 items-center justify-center rounded-lg ${sending ? "bg-sky-400/15 text-sky-300" : "bg-cyan-400/15 text-cyan-300"}`}>
+          <span className={`flex h-7 w-7 items-center justify-center rounded-lg ${sending ? "bg-sky-400/15 text-accent" : "bg-cyan-400/15 text-cyan-300"}`}>
             <Icon name={sending ? "upload" : "download"} />
           </span>
-          <span className="text-sm font-medium text-sky-50">{done ? t("transfer.completed") : t(`transfer.${transfer.direction === "sending" ? "sending" : "receiving"}`)}</span>
-          <span className="text-xs text-slate-400">· {transfer.file_count} {fileWord}</span>
+          <span className="text-sm font-medium text-heading">{done ? t("transfer.completed") : t(`transfer.${transfer.direction === "sending" ? "sending" : "receiving"}`)}</span>
+          <span className="text-xs text-muted">· {transfer.file_count} {fileWord}</span>
         </div>
-        <span className="font-mono-num text-sm text-slate-300">{pct.toFixed(0)}%</span>
+        <span className="font-mono-num text-sm text-secondary">{pct.toFixed(0)}%</span>
       </div>
 
       <div className="mb-4 max-h-32 space-y-1 overflow-auto pr-1">
         {transfer.items.map((it, i) => (
           <div key={i} className="flex items-center justify-between rounded-lg bg-white/[0.02] px-3 py-1.5">
             <div className="flex min-w-0 items-center gap-2">
-              <Icon name="file" className="shrink-0 text-slate-500" />
-              <span className="truncate text-xs text-slate-300">{it.name}</span>
+              <Icon name="file" className="shrink-0 text-subtle" />
+              <span className="truncate text-xs text-secondary">{it.name}</span>
             </div>
-            <span className="ml-2 shrink-0 font-mono-num text-xs text-slate-400">{formatBytes(it.size)}</span>
+            <span className="ml-2 shrink-0 font-mono-num text-xs text-muted">{formatBytes(it.size)}</span>
           </div>
         ))}
-        {transfer.items.length > 6 && <p className="px-1 text-xs text-slate-400">+{transfer.items.length - 6}</p>}
+        {transfer.items.length > 6 && <p className="px-1 text-xs text-muted">+{transfer.items.length - 6}</p>}
       </div>
 
       <div className="h-2 w-full overflow-hidden rounded-full bg-white/5">
         <div className={`h-full rounded-full transition-[width] duration-200 ${done ? "bg-gradient-to-r from-emerald-400 to-teal-400" : "bg-gradient-to-r from-sky-400 to-cyan-400"}`}
           style={{ width: `${Math.min(100, pct)}%` }} />
       </div>
-      <div className="mt-2 flex justify-between text-xs text-slate-400">
+      <div className="mt-2 flex justify-between text-xs text-muted">
         <span className="font-mono-num">{formatBytes(transferred)} / {formatBytes(transfer.total)}</span>
         <span className="font-mono-num">
           {!done && speed > 0 ? `${formatBytes(speed)}${t("transfer.perSecSuffix")}` : ""}
@@ -647,7 +667,7 @@ function TransferCard({ transfer, progress, pct, speed, eta, done, t, onCancel }
 
 function Footer({ t }: { t: (k: string) => string }) {
   return (
-    <div className="flex items-center justify-center gap-2 text-xs text-slate-400">
+    <div className="flex items-center justify-center gap-2 text-xs text-muted">
       <Icon name="lock" />
       <span>{t("footer.crypto")}</span>
     </div>
@@ -665,13 +685,12 @@ function SettingsModal({ t, lang, setLang, theme, setTheme, config, saveDirLabel
   onError: (e: string) => void; onSaved: () => Promise<void>;
 }) {
   const [name, setName] = useState(config?.deviceName ?? "");
-  const [mailboxUrl, setMailboxUrl] = useState(config?.mailboxUrl ?? "");
+  const panelRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(true, panelRef);
 
-  // Escape to close
   useEffect(() => {
     setName(config?.deviceName ?? "");
-    setMailboxUrl(config?.mailboxUrl ?? "");
-  }, [config?.deviceName, config?.mailboxUrl]);
+  }, [config?.deviceName]);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
@@ -685,31 +704,26 @@ function SettingsModal({ t, lang, setLang, theme, setTheme, config, saveDirLabel
     catch (e) { onError(String(e)); }
   };
 
-  const saveMailboxUrl = async () => {
-    try { await invoke("set_mailbox_url", { url: mailboxUrl.trim() }); await onSaved(); onClose(); }
-    catch (e) { onError(String(e)); }
-  };
-
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="settings-title"
       className="absolute inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 p-6 backdrop-blur-sm" onClick={onClose}>
-      <div className="frost-panel animate-fade-in my-auto w-full max-w-md max-h-full overflow-y-auto rounded-2xl p-6" onClick={(e) => e.stopPropagation()}>
+      <div ref={panelRef} className="frost-panel animate-fade-in my-auto w-full max-w-md max-h-full overflow-y-auto rounded-2xl p-6" onClick={(e) => e.stopPropagation()}>
         <div className="mb-5 flex items-center justify-between">
-          <h2 id="settings-title" className="text-xl font-semibold text-sky-50">{t("settings.title")}</h2>
+          <h2 id="settings-title" className="text-xl font-semibold text-heading">{t("settings.title")}</h2>
           <button onClick={onClose} aria-label={t("common.cancel")}
-            className="rounded-lg p-1 text-slate-400 transition hover:bg-white/10 hover:text-slate-200 active:scale-95">
+            className="flex h-11 w-11 items-center justify-center rounded-lg text-muted transition hover:bg-white/10 hover:text-secondary active:scale-95">
             <Icon name="close" />
           </button>
         </div>
 
         <div className="space-y-5">
           <div>
-            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-400">{t("settings.theme")}</label>
+            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-muted">{t("settings.theme")}</label>
             <div className="frost-panel flex rounded-xl p-1">
               {(["system", "dark", "light"] as Theme[]).map((th) => (
                 <button key={th} onClick={() => setTheme(th)}
                   className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition ${
-                    theme === th ? "bg-gradient-to-r from-sky-500/90 to-cyan-500/90 text-white" : "text-slate-400 hover:bg-white/5 hover:text-slate-200 active:scale-[0.97]"}`}>
+                    theme === th ? "bg-gradient-to-r from-sky-500/90 to-cyan-500/90 text-white" : "text-muted hover:bg-white/5 hover:text-secondary active:scale-[0.97]"}`}>
                   {t(`settings.theme.${th}`)}
                 </button>
               ))}
@@ -717,12 +731,12 @@ function SettingsModal({ t, lang, setLang, theme, setTheme, config, saveDirLabel
           </div>
 
           <div>
-            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-400">{t("settings.language")}</label>
+            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-muted">{t("settings.language")}</label>
             <div className="frost-panel flex rounded-xl p-1">
               {(["tr", "en"] as Lang[]).map((l) => (
                 <button key={l} onClick={() => setLang(l)}
                   className={`flex-1 rounded-lg px-4 py-2 text-sm font-medium uppercase transition ${
-                    lang === l ? "bg-gradient-to-r from-sky-500/90 to-cyan-500/90 text-white" : "text-slate-400 hover:bg-white/5 hover:text-slate-200 active:scale-[0.97]"}`}>
+                    lang === l ? "bg-gradient-to-r from-sky-500/90 to-cyan-500/90 text-white" : "text-muted hover:bg-white/5 hover:text-secondary active:scale-[0.97]"}`}>
                   {l === "tr" ? "Türkçe" : "English"}
                 </button>
               ))}
@@ -730,53 +744,37 @@ function SettingsModal({ t, lang, setLang, theme, setTheme, config, saveDirLabel
           </div>
 
           <div>
-            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-400">{t("settings.saveDir")}</label>
+            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-muted">{t("settings.saveDir")}</label>
             <div className="flex items-center gap-2">
-              <div title={saveDirLabel} className="font-mono-num min-w-0 flex-1 break-all rounded-xl border border-sky-300/15 bg-slate-950/50 px-3 py-2.5 text-sm text-slate-300">{saveDirLabel}</div>
+              <div title={saveDirLabel} className="font-mono-num min-w-0 flex-1 break-all rounded-xl border border-input bg-input px-3 py-2.5 text-sm text-secondary">{saveDirLabel}</div>
               <button onClick={onChooseSaveDir}
-                className="shrink-0 rounded-xl bg-sky-400/15 px-4 py-2.5 text-sm font-medium text-sky-100 transition hover:bg-sky-400/25 active:scale-[0.98]">
+                className="shrink-0 rounded-xl bg-sky-400/15 px-4 py-2.5 text-sm font-medium text-accent-strong transition hover:bg-sky-400/25 active:scale-[0.98]">
                 {t("settings.saveDirChoose")}
               </button>
             </div>
           </div>
 
           <div>
-            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-400">{t("settings.deviceName")}</label>
+            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-muted">{t("settings.deviceName")}</label>
             <div className="flex gap-2">
               <input id="device-name" value={name} aria-label={t("settings.deviceName")}
                 onChange={(e) => setName(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && saveName()}
                 placeholder={t("settings.deviceNamePlaceholder")}
-                className="min-w-0 flex-1 rounded-xl border border-sky-300/15 bg-slate-950/50 px-3 py-2.5 text-sm text-sky-50 outline-none transition focus-visible:border-sky-400/60" />
+                className="min-w-0 flex-1 rounded-xl border border-input bg-input px-3 py-2.5 text-sm text-heading outline-none transition focus-visible:border-sky-400/60" />
               <button onClick={saveName} disabled={!name.trim()}
-                className="shrink-0 rounded-xl bg-sky-400/15 px-4 py-2.5 text-sm font-medium text-sky-100 transition enabled:hover:bg-sky-400/25 active:scale-[0.98] disabled:opacity-40">
+                className="shrink-0 rounded-xl bg-sky-400/15 px-4 py-2.5 text-sm font-medium text-accent-strong transition enabled:hover:bg-sky-400/25 active:scale-[0.98] disabled:opacity-40">
                 {t("settings.deviceNameSave")}
               </button>
             </div>
           </div>
 
           <div>
-            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-400">{t("settings.mailboxUrl")}</label>
-            <div className="flex gap-2">
-              <input id="mailbox-url" value={mailboxUrl} aria-label={t("settings.mailboxUrl")}
-                onChange={(e) => setMailboxUrl(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && saveMailboxUrl()}
-                placeholder={t("settings.mailboxUrlPlaceholder")}
-                className="font-mono-num min-w-0 flex-1 rounded-xl border border-sky-300/15 bg-slate-950/50 px-3 py-2.5 text-sm text-sky-50 outline-none transition focus-visible:border-sky-400/60" />
-              <button onClick={saveMailboxUrl}
-                className="shrink-0 rounded-xl bg-sky-400/15 px-4 py-2.5 text-sm font-medium text-sky-100 transition hover:bg-sky-400/25 active:scale-[0.98]">
-                {t("settings.mailboxUrlSave")}
-              </button>
-            </div>
-            <p className="mt-1.5 text-xs text-slate-500">{t("settings.mailboxUrlHint")}</p>
-          </div>
-
-          <div>
-            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-slate-400">{t("settings.history")}</label>
+            <label className="mb-2 block text-xs font-medium uppercase tracking-wider text-muted">{t("settings.history")}</label>
             {history.length === 0 ? (
-              <p className="text-sm text-slate-500">{t("settings.historyEmpty")}</p>
+              <p className="text-sm text-subtle">{t("settings.historyEmpty")}</p>
             ) : (
-              <ul className="max-h-36 space-y-1 overflow-auto text-xs text-slate-400">
+              <ul className="max-h-36 space-y-1 overflow-auto text-xs text-muted">
                 {history.slice(0, 12).map((h) => (
                   <li key={h.id} className="rounded-lg bg-white/[0.03] px-3 py-2">
                     {t("settings.historyEntry")
@@ -801,6 +799,9 @@ function PeerPickerModal({ peers, t, onPick, onCancel }: {
   onPick: (p: DiscoveredPeer) => void;
   onCancel: () => void;
 }) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(true, panelRef);
+
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
     window.addEventListener("keydown", h);
@@ -810,22 +811,22 @@ function PeerPickerModal({ peers, t, onPick, onCancel }: {
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="peer-picker-title"
       className="absolute inset-0 z-[55] flex items-center justify-center overflow-y-auto bg-black/70 p-6 backdrop-blur-sm">
-      <div className="frost-panel animate-fade-in my-auto w-full max-w-md rounded-2xl p-6">
-        <h2 id="peer-picker-title" className="text-xl font-semibold text-sky-50">{t("join.pickPeer")}</h2>
+      <div ref={panelRef} className="frost-panel animate-fade-in my-auto w-full max-w-md rounded-2xl p-6">
+        <h2 id="peer-picker-title" className="text-xl font-semibold text-heading">{t("join.pickPeer")}</h2>
         <p className="mt-2 text-sm text-muted">{t("join.pickPeerDesc")}</p>
         <ul className="mt-4 space-y-2">
           {peers.map((p) => (
             <li key={`${p.address}:${p.port}`}>
               <button type="button" onClick={() => onPick(p)}
                 className="w-full rounded-xl border border-sky-300/15 bg-white/[0.04] px-4 py-3 text-left transition hover:bg-white/[0.08] active:scale-[0.99]">
-                <span className="block text-sm font-medium text-sky-50">{p.displayName}</span>
-                <span className="font-mono-num text-xs text-slate-500">{p.address}:{p.port}</span>
+                <span className="block text-sm font-medium text-heading">{p.displayName}</span>
+                <span className="font-mono-num text-xs text-subtle">{p.address}:{p.port}</span>
               </button>
             </li>
           ))}
         </ul>
         <button type="button" onClick={onCancel}
-          className="mt-4 w-full rounded-xl px-4 py-2.5 text-sm text-slate-400 transition hover:bg-white/5 hover:text-slate-200">
+          className="mt-4 w-full rounded-xl px-4 py-2.5 text-sm text-muted transition hover:bg-white/5 hover:text-secondary">
           {t("common.cancel")}
         </button>
       </div>
@@ -841,6 +842,8 @@ function PendingTransferModal({ transfer, t, formatBytes, onAccept, onReject }: 
   onReject: () => void;
 }) {
   const fileWord = transfer.file_count === 1 ? t("transfer.fileOne") : t("transfer.fileMany");
+  const panelRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(true, panelRef);
 
   useEffect(() => {
     const h = (e: KeyboardEvent) => { if (e.key === "Escape") onReject(); };
@@ -851,21 +854,21 @@ function PendingTransferModal({ transfer, t, formatBytes, onAccept, onReject }: 
   return (
     <div role="dialog" aria-modal="true" aria-labelledby="pending-transfer-title"
       className="absolute inset-0 z-[60] flex items-center justify-center overflow-y-auto bg-black/70 p-6 backdrop-blur-sm">
-      <div className="frost-panel animate-fade-in my-auto w-full max-w-md max-h-full overflow-y-auto rounded-2xl p-6">
-        <h2 id="pending-transfer-title" className="text-xl font-semibold text-sky-50">{t("transfer.pending.title")}</h2>
+      <div ref={panelRef} className="frost-panel animate-fade-in my-auto w-full max-w-md max-h-full overflow-y-auto rounded-2xl p-6">
+        <h2 id="pending-transfer-title" className="text-xl font-semibold text-heading">{t("transfer.pending.title")}</h2>
         <p className="mt-2 text-sm text-muted">{t("transfer.pending.desc")}</p>
-        <p className="mt-4 text-xs text-slate-500">{transfer.file_count} {fileWord} · {formatBytes(transfer.total)}</p>
+        <p className="mt-4 text-xs text-subtle">{transfer.file_count} {fileWord} · {formatBytes(transfer.total)}</p>
         <div className="mt-3 max-h-40 space-y-1 overflow-auto">
           {transfer.items.map((it, i) => (
             <div key={i} className="flex items-center justify-between rounded-lg bg-white/[0.03] px-3 py-1.5 text-xs">
-              <span className="truncate text-slate-300">{it.name}</span>
-              <span className="ml-2 shrink-0 font-mono-num text-slate-500">{formatBytes(it.size)}</span>
+              <span className="truncate text-secondary">{it.name}</span>
+              <span className="ml-2 shrink-0 font-mono-num text-subtle">{formatBytes(it.size)}</span>
             </div>
           ))}
         </div>
         <div className="mt-6 flex gap-2">
           <button type="button" onClick={onReject}
-            className="flex-1 rounded-xl border border-sky-300/15 bg-white/[0.04] px-4 py-3 text-sm font-medium text-slate-300 transition hover:bg-white/[0.08] active:scale-[0.99]">
+            className="flex-1 rounded-xl border border-sky-300/15 bg-white/[0.04] px-4 py-3 text-sm font-medium text-secondary transition hover:bg-white/[0.08] active:scale-[0.99]">
             {t("transfer.pending.reject")}
           </button>
           <button type="button" onClick={onAccept}
