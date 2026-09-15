@@ -26,6 +26,7 @@ pub fn run() {
             commands::send_files,
             commands::cancel_transfer,
             commands::current_liveness_code,
+            commands::confirm_sas,
             commands::disconnect,
             commands::respond_incoming_transfer,
             commands::get_config,

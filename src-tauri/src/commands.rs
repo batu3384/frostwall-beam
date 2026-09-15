@@ -221,6 +221,9 @@ pub struct AppState {
     /// mid-bind (no `pairing_task` yet) cannot come back as a zombie session.
     /// `Arc` so LAN browse can observe a cancel from `spawn_blocking`.
     session_epoch: Arc<AtomicU64>,
+    /// UI confirmed the rotating SAS codes match. `send_files` requires this;
+    /// pairing itself does not (SPAKE2 already ran).
+    sas_confirmed: AtomicBool,
 }
 
 /// Mailbox registration held by an internet-mode host until pairing completes
@@ -255,6 +258,7 @@ impl AppState {
             peer_display_name: Mutex::new(None),
             internet_cleanup: Mutex::new(None),
             session_epoch: Arc::new(AtomicU64::new(0)),
+            sas_confirmed: AtomicBool::new(false),
         }
     }
 
@@ -308,6 +312,7 @@ impl AppState {
         }
         self.cleanup_internet().await;
         *self.peer_display_name.lock().await = None;
+        self.sas_confirmed.store(false, Ordering::SeqCst);
     }
 }
 
@@ -675,7 +680,16 @@ async fn wait_incoming_with_peer(
             }
             frame = conn.recv() => {
                 match interpret_peer_during_idle(keys, frame) {
-                    PeerNoise::Stray | PeerNoise::Manifest => continue,
+                    PeerNoise::Stray => continue,
+                    PeerNoise::Manifest => {
+                        // Extra Manifest while the first is still on screen:
+                        // swallowing it left the sender on the 6 min Accept clock.
+                        if !write_reject(conn, keys).await {
+                            take_incoming_slot(state, epoch).await;
+                            return IncomingPick::Dropped;
+                        }
+                        continue;
+                    }
                     PeerNoise::Cancel => {
                         take_incoming_slot(state, epoch).await;
                         return IncomingPick::Cancelled;
@@ -836,12 +850,12 @@ async fn run_coordinator(
                             }
                         }
                     };
-                    let mut sent = false;
                     let result = match collected {
                         Err(CollectFail::Gone) => {
+                            let _ = collect_jh.await;
                             clear_cancel_if_live(&app, epoch);
                             set_in_flight_if_live(&app, epoch, false);
-                            let _ = reply.send(Err(anyhow::anyhow!("connection closed by peer")));
+                            let _ = reply.send(Err(anyhow::anyhow!(crate::transport::CLOSED_BY_PEER)));
                             emit_transfer_done(&app, epoch, false);
                             emit_disconnect_if_live(&app, epoch);
                             break;
@@ -852,9 +866,9 @@ async fn run_coordinator(
                             // Accept/Reject. Dropping the frame left them on
                             // the 6 min decision clock.
                             if write_reject(&mut conn, &keys).await {
-                                Err(anyhow::anyhow!("peer started a transfer at the same time"))
+                                Err(anyhow::anyhow!(transfer::COLLISION_MSG))
                             } else {
-                                Err(anyhow::anyhow!("connection closed by peer"))
+                                Err(anyhow::anyhow!(crate::transport::CLOSED_BY_PEER))
                             }
                         }
                         Ok(join) => match join {
@@ -865,7 +879,6 @@ async fn run_coordinator(
                                 Err(anyhow::anyhow!("nothing to send"))
                             } else {
                             let total: u64 = tr_items.iter().map(|i| i.size).sum();
-                            sent = true;
                             let app = app.clone();
                             emit_live(
                                 &app,
@@ -892,13 +905,6 @@ async fn run_coordinator(
                     let fail = result.as_ref().err().map(|e| e.to_string());
                     let ok = result.is_ok();
                     let dead = result.as_ref().err().is_some_and(transfer::is_pipe_dead);
-                    if result.is_err()
-                        && !dead
-                        && sent
-                        && result.as_ref().err().is_some_and(transfer::needs_abort_drain)
-                    {
-                        transfer::drain_after_abort(&mut conn).await;
-                    }
                     set_in_flight_if_live(&app, epoch, false);
                     let _ = reply.send(result);
                     emit_transfer_finished(&app, epoch, ok, fail);
@@ -950,13 +956,26 @@ async fn run_coordinator(
                         emit_notice(&app, epoch, "invalid transfer manifest");
                         continue;
                     }
-                    if let Err(msg) = recv_dest_dir(&app) {
+                    let dest_for_paths = match recv_dest_dir(&app) {
+                        Ok(d) => d,
+                        Err(msg) => {
+                            if !write_reject(&mut conn, &keys).await {
+                                emit_transfer_done(&app, epoch, false);
+                                emit_disconnect_if_live(&app, epoch);
+                                break;
+                            }
+                            emit_notice(&app, epoch, msg);
+                            emit_transfer_done(&app, epoch, false);
+                            continue;
+                        }
+                    };
+                    if let Err(e) = transfer::manifest_fits_dest(&dest_for_paths, &entries) {
                         if !write_reject(&mut conn, &keys).await {
                             emit_transfer_done(&app, epoch, false);
                             emit_disconnect_if_live(&app, epoch);
                             break;
                         }
-                        emit_notice(&app, epoch, msg);
+                        emit_notice(&app, epoch, e.to_string());
                         emit_transfer_done(&app, epoch, false);
                         continue;
                     }
@@ -1094,7 +1113,6 @@ async fn run_coordinator(
                         if !transfer::is_local_cancel(&e) {
                             emit_notice(&app, epoch, msg);
                         }
-                        transfer::drain_after_abort(&mut conn).await;
                         continue;
                     }
                     emit_transfer_done(&app, epoch, true);
@@ -1783,10 +1801,20 @@ pub async fn join_peer(
     Ok(epoch)
 }
 
-/// Mailbox join: 6 digits after stripping whitespace (`123 456`, trailing newline).
+/// Mailbox join: 6 digits after stripping whitespace (`123 456`) or spoken
+/// separators (`123-456`). Invite paste is handled by `parse_invite` first.
+/// Truncated `endpoint…` / `fwb*` must not fall through as a mailbox code.
 fn six_digit_join_code(input: &str) -> Option<String> {
     let compact: String = input.chars().filter(|c| !c.is_whitespace()).collect();
-    (compact.len() == 6 && compact.chars().all(|c| c.is_ascii_digit())).then_some(compact)
+    let lower = compact.to_ascii_lowercase();
+    if lower.contains("fwb") || lower.contains("endpoint") {
+        return None;
+    }
+    if compact.len() == 6 && compact.chars().all(|c| c.is_ascii_digit()) {
+        return Some(compact);
+    }
+    let digits: String = input.chars().filter(|c| c.is_ascii_digit()).collect();
+    (digits.len() == 6).then_some(digits)
 }
 
 /// Joiner: dial a host on another network. Prefer a full invite (iroh
@@ -1909,6 +1937,12 @@ pub async fn join_internet(app: AppHandle, state: State<'_, AppState>, invite: S
 /// Send a list of files/folders to the peer.
 #[tauri::command]
 pub async fn send_files(state: State<'_, AppState>, paths: Vec<String>) -> Result<(), String> {
+    if state.cmd_tx.lock().await.is_none() {
+        return Err("not connected".to_string());
+    }
+    if !state.sas_confirmed.load(Ordering::SeqCst) {
+        return Err("verify the pairing codes before sending".to_string());
+    }
     try_reserve_transfer(&state)?;
     let _ = install_cancel(&state);
     let tx = state
@@ -1957,9 +1991,22 @@ pub async fn current_liveness_code(state: State<'_, AppState>) -> Result<Option<
     Ok(Some(liveness::current_code(key, now_unix())))
 }
 
-/// Cancel the in-flight transfer without disconnecting the session.
+/// Caller confirmed the rotating verification codes match. Required before send.
 #[tauri::command]
-pub async fn cancel_transfer(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn confirm_sas(state: State<'_, AppState>) -> Result<(), String> {
+    if state.cmd_tx.lock().await.is_none() {
+        return Err("not connected".to_string());
+    }
+    state.sas_confirmed.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Cancel the in-flight transfer without disconnecting the session.
+async fn cancel_active_transfer(state: &AppState) -> Result<(), String> {
+    if let Some(tx) = state.incoming_decision.lock().await.take() {
+        let _ = tx.send(false);
+        return Ok(());
+    }
     let in_flight = state
         .in_flight
         .lock()
@@ -1976,6 +2023,11 @@ pub async fn cancel_transfer(state: State<'_, AppState>) -> Result<(), String> {
         .ok_or_else(|| "no transfer in progress".to_string())?;
     flag.store(true, Ordering::SeqCst);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_transfer(state: State<'_, AppState>) -> Result<(), String> {
+    cancel_active_transfer(&state).await
 }
 
 /// Disconnect and tear down the current session, or cancel an in-progress
@@ -2024,14 +2076,14 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<ConfigPayload, Str
         .map(|g| g.clone())
         .ok()
         .flatten();
-    let mailbox_url = state
+    let stored = state
         .mailbox_url
         .lock()
         .map(|g| g.clone())
         .ok()
-        .flatten()
-        .filter(|u| crate::config::mailbox_url_allowed(u));
-    let remote_available = crate::config::remote_mailbox_configured(&mailbox_url);
+        .flatten();
+    let mailbox_url = crate::config::configured_mailbox_url(&stored);
+    let remote_available = mailbox_url.is_some();
     Ok(ConfigPayload {
         download_dir,
         device_name,
@@ -2215,8 +2267,12 @@ mod tests {
     fn six_digit_join_code_strips_whitespace() {
         assert_eq!(six_digit_join_code("123456").as_deref(), Some("123456"));
         assert_eq!(six_digit_join_code(" 123 456 \n").as_deref(), Some("123456"));
+        assert_eq!(six_digit_join_code("123-456").as_deref(), Some("123456"));
+        assert_eq!(six_digit_join_code("123.456").as_deref(), Some("123456"));
         assert_eq!(six_digit_join_code("1234567"), None);
+        assert_eq!(six_digit_join_code("123-456-7"), None);
         assert_eq!(six_digit_join_code("fwb2-x"), None);
+        assert_eq!(six_digit_join_code("endpointabc-123456"), None);
         assert_eq!(six_digit_join_code(""), None);
         assert_eq!(normalize_pairing_code(" 123 456 ").as_deref(), Ok("123456"));
         assert!(normalize_pairing_code("12345").is_err());
@@ -2488,6 +2544,75 @@ mod tests {
         assert!(matches!(pick, IncomingPick::Accept), "{pick:?}");
     }
 
+    #[tokio::test]
+    async fn wait_incoming_rejects_second_manifest() {
+        let state = AppState::new();
+        let epoch = state.epoch();
+        let keys = SessionKeys::derive(b"pending-dup-man");
+        let (mut a, mut b) = loopback_pair().await;
+        let man = transfer::seal_control(
+            &keys,
+            &Message::Manifest(vec![crate::protocol::ManifestEntry {
+                rel_path: "a.txt".into(),
+                size: 1,
+            }]),
+        )
+        .unwrap();
+        let pick = tokio::time::timeout(Duration::from_secs(2), async {
+            let extra = async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                a.send(&man).await.unwrap();
+                let reply = tokio::time::timeout(Duration::from_secs(1), a.recv())
+                    .await
+                    .expect("Reject for extra Manifest")
+                    .unwrap();
+                assert!(
+                    matches!(
+                        transfer::open_control(&keys, &reply).unwrap(),
+                        Message::Reject
+                    ),
+                    "extra Manifest must not be swallowed"
+                );
+                if let Some(tx) = state.incoming_decision.lock().await.take() {
+                    tx.send(true).unwrap();
+                }
+            };
+            let wait = wait_incoming_with_peer(&state, epoch, &mut b, &keys);
+            tokio::join!(wait, extra).0
+        })
+        .await
+        .expect("second Manifest must not hang the accept wait");
+        assert!(matches!(pick, IncomingPick::Accept), "{pick:?}");
+    }
+
+    #[tokio::test]
+    async fn cancel_transfer_declines_pending_incoming() {
+        let state = AppState::new();
+        if let Ok(mut g) = state.in_flight.lock() {
+            *g = true;
+        }
+        let (tx, rx) = oneshot::channel();
+        *state.incoming_decision.lock().await = Some(tx);
+        cancel_active_transfer(&state).await.unwrap();
+        assert_eq!(rx.await, Ok(false));
+        assert!(state.incoming_decision.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn clear_resets_sas_confirmed() {
+        let state = AppState::new();
+        state.sas_confirmed.store(true, Ordering::SeqCst);
+        state.clear().await;
+        assert!(!state.sas_confirmed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn cancel_transfer_without_work_errors() {
+        let state = AppState::new();
+        let err = cancel_active_transfer(&state).await.unwrap_err();
+        assert!(err.contains("no transfer in progress"), "{err}");
+    }
+
     #[test]
     fn interpret_peer_noise_classifies_control_frames() {
         let keys = SessionKeys::derive(b"noise");
@@ -2514,7 +2639,7 @@ mod tests {
             PeerNoise::Manifest
         );
         assert_eq!(
-            interpret_peer_during_idle(&keys, Err(anyhow::anyhow!("connection closed by peer"))),
+            interpret_peer_during_idle(&keys, Err(anyhow::anyhow!(crate::transport::CLOSED_BY_PEER))),
             PeerNoise::Gone
         );
     }

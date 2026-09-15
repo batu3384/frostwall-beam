@@ -2093,6 +2093,7 @@ mod tests {
         let named = make_invite_from_addr_named(&addr, "112233", Some("Desk"));
         assert_eq!(ts_lan_code(&named), parse_invite(&named).unwrap().code);
         assert_eq!(ts_lan_code("12ab34"), "1234");
+        assert_eq!(ts_lan_code("123-456"), "123456");
         assert_eq!(ts_lan_code("1234567"), "1234567");
         assert_eq!(ts_lan_code("fwb1-deadbeef"), "");
         assert_eq!(ts_lan_code("fwb3-123456"), "");
