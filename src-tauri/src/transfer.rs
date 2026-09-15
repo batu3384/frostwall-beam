@@ -56,6 +56,7 @@ const DONE_REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 /// `recv` forever. 5 min still allows a slow 256 KiB relay chunk (~1 KB/s).
 const PAYLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const PAYLOAD_STALL_MSG: &str = "timed out waiting for payload";
+pub const COLLISION_MSG: &str = "peer started a transfer at the same time";
 /// Suffix for the temp file a transfer writes before atomic rename.
 const PARTIAL_SUFFIX: &str = ".frostwallpart";
 
@@ -68,20 +69,20 @@ pub fn is_cancelled(err: &anyhow::Error) -> bool {
 /// continue would desync the next Manifest (`Framed` mid-send / silent NAT).
 pub fn is_pipe_dead(err: &anyhow::Error) -> bool {
     let s = err.to_string();
-    s.contains("connection closed")
-        || s.contains("recv frame")
-        || s.contains("send frame")
+    s == crate::transport::CLOSED_BY_PEER
+        || s.starts_with(crate::transport::RECV_FRAME_PREFIX)
+        || s.starts_with(crate::transport::SEND_FRAME_PREFIX)
         || s.contains(PAYLOAD_STALL_MSG)
 }
 
 /// Both sides sent (or one side saw a Manifest while collecting).
 pub fn is_collision(err: &anyhow::Error) -> bool {
-    err.to_string().contains("peer started a transfer at the same time")
+    err.to_string().contains(COLLISION_MSG)
 }
 
-/// Leftover payload frames may still be on the wire. Pre-Accept failures
-/// (reject, collision, accept-wait timeout) must not drain — that window
-/// eats the peer's immediate next Manifest.
+/// Leftover payload frames. Coordinator no longer drains — idle `recv`
+/// ignores Chunk/FileEnd/control noise and waits for the next Manifest.
+/// Kept so `transfer::send`/`recv` tests can clear a pipe between runs.
 pub fn needs_abort_drain(err: &anyhow::Error) -> bool {
     if is_pipe_dead(err) || is_collision(err) {
         return false;
@@ -130,10 +131,9 @@ fn recv_fail_signal(err: &anyhow::Error) -> Option<Message> {
     }
 }
 
-/// Drop leftover frames after an aborted transfer so the session can stay up.
-///
-/// ponytail: 2s drain cap. Frames still in flight after that desync the
-/// next Manifest. Upgrade: transfer sequence / explicit reset frame.
+/// Drop leftover frames after an aborted `send`/`recv` test so the next
+/// direct call is not confused by in-flight chunks. Production coordinator
+/// skips this: idle swallows stray frames instead of eating a retry Manifest.
 pub async fn drain_after_abort(conn: &mut Connection) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
@@ -1066,6 +1066,15 @@ pub fn validate_manifest(entries: &[ManifestEntry]) -> Result<u64> {
     Ok(total)
 }
 
+/// Real download dir + each Manifest path (Windows MAX_PATH, etc.).
+/// Call after [`validate_manifest`] once `dest` is the absolute save folder.
+pub fn manifest_fits_dest(dest: &Path, entries: &[ManifestEntry]) -> Result<()> {
+    for e in entries {
+        confine_path(dest, &e.rel_path)?;
+    }
+    Ok(())
+}
+
 /// Expand a list of roots (files and/or folders) into a flat send list.
 /// Symlinks are **never followed** (local-data-exfiltration guard): a symlink
 /// root is rejected, and symlinks inside a folder are skipped.
@@ -1295,7 +1304,7 @@ pub async fn send<F: FnMut(Progress)>(
         Message::Reject => return Err(anyhow!("transfer rejected by peer")),
         Message::Cancel => return Err(anyhow!("transfer cancelled by peer")),
         Message::Manifest(_) => {
-            return Err(anyhow!("peer started a transfer at the same time"))
+            return Err(anyhow!(COLLISION_MSG))
         }
         _ => return Err(anyhow!("unexpected control message (wanted Accept)")),
     }
@@ -1653,28 +1662,24 @@ mod tests {
             Some(Message::Cancel)
         );
         assert_eq!(recv_fail_signal(&anyhow!(PAYLOAD_STALL_MSG)), None);
-        assert_eq!(recv_fail_signal(&anyhow!("connection closed by peer")), None);
+        assert_eq!(recv_fail_signal(&anyhow!(crate::transport::CLOSED_BY_PEER)), None);
         assert_eq!(recv_fail_signal(&anyhow!("send frame: broken pipe")), None);
         assert!(!is_integrity_fail(&anyhow!("transfer cancelled by peer")));
     }
 
     #[test]
     fn pipe_dead_is_io_or_stall_not_cancel() {
-        assert!(is_pipe_dead(&anyhow!("connection closed by peer")));
+        assert!(is_pipe_dead(&anyhow!(crate::transport::CLOSED_BY_PEER)));
         assert!(is_pipe_dead(&anyhow!("recv frame: eof")));
         assert!(is_pipe_dead(&anyhow!("send frame: broken pipe")));
         assert!(is_pipe_dead(&anyhow!(PAYLOAD_STALL_MSG)));
         assert!(!is_pipe_dead(&anyhow!("transfer cancelled")));
         assert!(!is_pipe_dead(&anyhow!("integrity check failed")));
         assert!(!is_pipe_dead(&anyhow!("transfer rejected by peer")));
-        assert!(is_collision(&anyhow!(
-            "peer started a transfer at the same time"
-        )));
+        assert!(is_collision(&anyhow!(COLLISION_MSG)));
         assert!(!is_collision(&anyhow!("transfer rejected by peer")));
         assert!(!is_collision(&anyhow!(PAYLOAD_STALL_MSG)));
-        assert!(!needs_abort_drain(&anyhow!(
-            "peer started a transfer at the same time"
-        )));
+        assert!(!needs_abort_drain(&anyhow!(COLLISION_MSG)));
         assert!(!needs_abort_drain(&anyhow!("transfer rejected by peer")));
         assert!(!needs_abort_drain(&anyhow!(
             "timed out waiting for the peer to accept"
@@ -1909,6 +1914,9 @@ mod tests {
             confine_path(base, "dir/sub/b.txt").unwrap(),
             Path::new("/tmp/out/dir/sub/b.txt")
         );
+        assert!(manifest_fits_dest(base, &[ManifestEntry { rel_path: "a.txt".into(), size: 1 }]).is_ok());
+        let long = "a".repeat(4060);
+        assert!(manifest_fits_dest(base, &[ManifestEntry { rel_path: long, size: 1 }]).is_err());
     }
 
     // ---- C4: manifest caps ----

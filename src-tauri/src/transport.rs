@@ -27,6 +27,10 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 pub const MAX_FRAME: usize = 8 << 20;
 /// LAN TCP connect bound. A stale mDNS address must not hang Join forever.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Lockstep `transfer::is_pipe_dead`.
+pub const CLOSED_BY_PEER: &str = "connection closed by peer";
+pub const SEND_FRAME_PREFIX: &str = "send frame:";
+pub const RECV_FRAME_PREFIX: &str = "recv frame:";
 
 /// Anything that can back a [`Connection`]: a duplex byte stream.
 pub trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -40,10 +44,10 @@ pub async fn bind_to(ip: IpAddr, port: u16) -> Result<TcpListener> {
         .map_err(|e| anyhow!("bind: {e}"))
 }
 
-/// Bind on all interfaces (`0.0.0.0`). Used by tests; production binds to
-/// the discovered LAN interface via [`bind_to`].
+/// Bind on loopback. Tests only; production uses [`bind_to`] on the LAN IP.
+/// Windows `connect(0.0.0.0:port)` fails with WSAEADDRNOTAVAIL (10049).
 pub async fn bind(port: u16) -> Result<TcpListener> {
-    bind_to(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port).await
+    bind_to(IpAddr::V4(Ipv4Addr::LOCALHOST), port).await
 }
 
 /// Connect to a peer over LAN TCP and return a framed connection.
@@ -92,15 +96,15 @@ impl Connection {
         self.framed
             .send(Bytes::copy_from_slice(bytes))
             .await
-            .map_err(|e| anyhow!("send frame: {e}"))
+            .map_err(|e| anyhow!("{SEND_FRAME_PREFIX} {e}"))
     }
 
     /// Receive one framed message. Errors if the peer closed the connection.
     pub async fn recv(&mut self) -> Result<Vec<u8>> {
         match self.framed.next().await {
             Some(Ok(b)) => Ok(b.to_vec()),
-            Some(Err(e)) => Err(anyhow!("recv frame: {e}")),
-            None => Err(anyhow!("connection closed by peer")),
+            Some(Err(e)) => Err(anyhow!("{RECV_FRAME_PREFIX} {e}")),
+            None => Err(anyhow!(CLOSED_BY_PEER)),
         }
     }
 
@@ -112,8 +116,8 @@ impl Connection {
         match self.framed.next().now_or_never() {
             None => Ok(None),
             Some(Some(Ok(b))) => Ok(Some(b.to_vec())),
-            Some(Some(Err(e))) => Err(anyhow!("recv frame: {e}")),
-            Some(None) => Err(anyhow!("connection closed by peer")),
+            Some(Some(Err(e))) => Err(anyhow!("{RECV_FRAME_PREFIX} {e}")),
+            Some(None) => Err(anyhow!(CLOSED_BY_PEER)),
         }
     }
 }
@@ -121,6 +125,17 @@ impl Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn bind_local_addr_is_loopback() {
+        let listener = bind(0).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert!(addr.ip().is_loopback(), "{addr}");
+        let mut client = connect(addr).await.unwrap();
+        let mut server = accept(&listener).await.unwrap();
+        client.send(b"ping").await.unwrap();
+        assert_eq!(server.recv().await.unwrap(), b"ping");
+    }
 
     #[tokio::test]
     async fn send_recv_roundtrip() {
