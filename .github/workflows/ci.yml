@@ -28,7 +28,18 @@ jobs:
         run: cargo test --workspace
 
       - name: "cargo clippy (workspace, deny warnings)"
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  rust-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: "cargo test (workspace: app + mailbox)"
+        run: cargo test --workspace
+      - name: "cargo clippy (workspace, deny warnings)"
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   frontend:
     runs-on: ubuntu-latest

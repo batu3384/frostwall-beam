@@ -5,6 +5,7 @@ export interface TransferRecord {
   fileCount: number;
   totalBytes: number;
   ok: boolean;
+  err?: string;
 }
 
 const KEY = "frostwall.transferHistory";
@@ -18,8 +19,14 @@ function isHistoryEntry(value: unknown): value is TransferRecord {
     typeof e.at === "number" &&
     (e.direction === "sending" || e.direction === "receiving") &&
     typeof e.fileCount === "number" &&
+    Number.isFinite(e.fileCount) &&
+    e.fileCount >= 0 &&
     typeof e.totalBytes === "number" &&
+    Number.isFinite(e.totalBytes) &&
+    e.totalBytes >= 0 &&
+    Number.isFinite(e.at) &&
     typeof e.ok === "boolean"
+    && (e.err === undefined || (typeof e.err === "string" && e.err.length <= 240))
   );
 }
 
@@ -36,8 +43,10 @@ export function loadHistory(): TransferRecord[] {
 }
 
 export function appendHistory(entry: Omit<TransferRecord, "id" | "at">): TransferRecord[] {
+  const err = entry.err && entry.err.length > 240 ? entry.err.slice(0, 240) : entry.err;
   const next: TransferRecord = {
     ...entry,
+    err,
     id: crypto.randomUUID(),
     at: Date.now(),
   };

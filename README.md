@@ -20,7 +20,7 @@
 
 ## Overview
 
-**Frostwall Beam** is a cross-platform desktop app (macOS & Windows) for fast, private file transfers — on the same LAN or between two devices on entirely different networks. It combines a modern frost-themed UI with a security-first Rust core: SPAKE2 pairing, per-chunk AEAD encryption, Blake3 integrity checks, and explicit receiver approval before any payload is written to disk.
+**Frostwall Beam** is a cross-platform desktop app (macOS & Windows) for fast, private file transfers — on the same LAN, or between two devices on different networks. Remote pairing uses a shareable iroh ticket (plus the SPAKE2 digits); no hosted mailbox is required. It combines a frost-themed UI with a security-first Rust core: SPAKE2 pairing, per-chunk AEAD encryption, Blake3 integrity checks, and explicit receiver approval before any payload is written to disk.
 
 Built with **Tauri 2**, **Rust**, and **React** — one codebase, native installers, offline-friendly fonts, and minimal webview privileges.
 
@@ -29,8 +29,8 @@ Built with **Tauri 2**, **Rust**, and **React** — one codebase, native install
 | Area | What you get |
 |------|----------------|
 | **LAN discovery** | Pure-Rust mDNS — no system Bonjour dependency on Windows |
-| **Internet mode** | NAT traversal + relay fallback via `iroh` (QUIC), rendezvoused through a tiny self-hosted mailbox |
-| **Pairing** | 6-digit code + key-confirmation MAC + 30s rotating verification code |
+| **Internet mode** | NAT traversal + relay fallback via `iroh` (QUIC). Default: copy an invite. Optional self-hosted mailbox for 6-digit lookup |
+| **Pairing** | 6-digit code + key-confirmation MAC + 30s rotating verification code; send stays blocked until the user confirms the codes match |
 | **Transfer** | Files & folders, drag-and-drop, live speed/ETA, collision-safe renames |
 | **Control** | Accept/decline incoming manifests; cancel in-flight transfers without disconnecting |
 | **UX** | TR/EN UI, system/dark/light theme, transfer history, reduced-motion support |
@@ -42,13 +42,13 @@ Built with **Tauri 2**, **Rust**, and **React** — one codebase, native install
 - **MITM-resistant pairing** — SPAKE2 + ephemeral X25519 + human-verifiable rotating code
 - **Integrity** — per-file Blake3 hash verified before commit
 - **Receiver gate** — manifest reviewed and accepted before bytes hit disk
-- **Path hardening** — traversal, symlinks, dangerous Unicode, and system directories rejected
+- **Path hardening** — traversal, parent-path symlinks, Windows junctions, dangerous Unicode, system directories, and Windows device names rejected
 - **Forward secrecy** — fresh session keys each pairing
 
 ### Networking
 - **Same network**: zero-config mDNS discovery, direct LAN socket, **multi-host selection** when several peers advertise
-- **Different networks**: pick *Internet* mode on both devices — the host publishes an `iroh` `EndpointId` under the pairing code on a mailbox service; the joiner looks it up and dials in over QUIC, direct when NAT allows it, transparently relayed otherwise
-- The mailbox only ever stores `code → EndpointId` for a few minutes — it never sees file contents, keys, or the SPAKE2 handshake (see [Internet mode](#internet-mode-different-networks) below)
+- **Different networks**: pick **Remote** on both devices. The host copies an invite (iroh `EndpointTicket` + pairing digits, relay URL + direct IPs); the joiner pastes it. `iroh` dials by public key over QUIC — direct when NAT allows, otherwise relayed. An optional mailbox lets joiners type only the 6-digit code
+- The mailbox, if used, stores `code → EndpointId` plus relay/IP dial hints for a few minutes so joiners can type six digits — it never sees file contents, keys, or the SPAKE2 handshake (see [Internet mode](#internet-mode-different-networks) below)
 
 ### Transfer experience
 - Send **files or entire folders** (structure preserved)
@@ -93,9 +93,9 @@ pnpm tauri build
 
 ## How to use (two devices)
 
-1. **Host (Device A)** — pick **Same network** or **Internet**, then *Host a session* → *Generate pairing code* → share the 6-digit code.
-2. **Join (Device B)** — pick the **same** network mode as the host → *Join a session* → enter the code → *Connect* (pick a host if multiple appear on the LAN).
-3. **Verify** — confirm the **rotating 6-digit code** matches on both screens (anti-MITM check).
+1. **Host (Device A)** — *Host a session*. Same Wi‑Fi: share the 6-digit code. **Remote:** copy the invite and send it (message, mail, …). Same Wi‑Fi is not required.
+2. **Join (Device B)** — pick the **same** network mode as the host → *Join a session* → enter the code **or paste the invite** → *Connect* (pick a host if multiple appear on the LAN).
+3. **Verify** — both screens show the same **rotating 6-digit code**. Tap **codes match** (or **Kodlar aynı**) before sending; a mismatch disconnects.
 4. **Send** — drag files/folders onto the drop zone or use the file picker.
 5. **Receive** — on the target device, review the manifest → **Accept** or **Decline**.
 6. **Files land in** `~/Downloads/Frostwall Beam` by default, or your chosen folder in **Settings**.
@@ -108,19 +108,20 @@ mDNS and a direct LAN socket only work when both devices share a network — the
 
 ```
 Same network:      mDNS discovery        →  direct LAN TCP socket
-Different networks: mailbox (code → EndpointId) → iroh QUIC (hole-punch, relay fallback)
+Different networks: iroh ticket invite or optional mailbox (code → EndpointId + dial hints)
+                          → iroh QUIC (hole-punch, relay fallback)
                                                           ↓
                                     SPAKE2 pairing → AEAD frames → Blake3 (unchanged)
 ```
 
-- **[`iroh`](https://www.iroh.computer/)** gives each endpoint a public-key identity (`EndpointId`) and dials by key instead of IP: it tries a direct QUIC connection first (hole-punching through most home NATs) and transparently falls back to a relay when that's not possible. The connection is independently encrypted by QUIC on top of Frostwall's own AEAD layer.
-- The **mailbox** is a tiny rendezvous service (this repo's `mailbox/` crate) that maps your 6-digit code to the host's `EndpointId` for about 10 minutes, then forgets it. It is *not* a relay and never touches file data — only `frostwall-mailbox/src/main.rs`'s in-memory map of `code → EndpointId`.
-- **You need to run a mailbox yourself** (or use one a friend/your team runs) — there is no Frostwall-operated default. Set its URL once in **Settings → Mailbox server**.
+- **[`iroh`](https://www.iroh.computer/)** gives each endpoint a public-key identity (`EndpointId`) and dials by key instead of IP: it tries a direct QUIC connection first (hole-punching through most home NATs) and falls back to n0's HTTPS websocket relay when UDP is blocked. DNS uses the OS resolver (`getaddrinfo`) so scoped IPv6 in `/etc/resolv.conf` does not force a dead Google-UDP fallback. Transport encryption sits on top of Frostwall's own AEAD layer.
+- **Invite (default):** the host shares an iroh `EndpointTicket` plus the 6-digit SPAKE2 code (relay URL + globally reachable IPs; loopback, RFC1918, CGNAT, and IPv4-mapped private omitted) so the joiner can dial without a mailbox. If the first invite has no HTTPS relay, the host keeps hunting ~25s and rewrites the invite when a relay homes — copy again. Legacy `fwb2-<id>-<code>-<addrs>` and `fwb1-<id>-<code>` still parse. SPAKE2 still authenticates the session.
+- The **mailbox** is an optional convenience (this repo's `mailbox/` crate) that maps a 6-digit code to the host's `EndpointId` and dial hints (relay URL, shareable IPs). Entries last about 10 minutes unless the still-waiting host refreshes them. It is *not* a relay and never touches file data. Set its URL in **Settings → Pairing server** if you want joiners to type six digits instead of pasting the invite.
 
-### Deploying your own mailbox
+### Optional: deploying your own mailbox
 
 ```bash
-# Run directly (binds 0.0.0.0:8787 by default; override with PORT=…)
+# Default bind is loopback. Public listen: MAILBOX_BIND=0.0.0.0 PORT=8787
 cargo run --release -p frostwall-mailbox
 
 # Or build once and run the binary
@@ -145,7 +146,7 @@ Pairing code (SPAKE2)  →  session keys (HKDF)  →  encrypted frames (AEAD)
 - **Internet mailbox** must use HTTPS in release builds (plain `http://127.0.0.1` is allowed only for local dev). Registration returns a one-time token; unregister requires that token. First successful register wins for a code (no hijack overwrite).
 - Pairing codes are validated (six digits) and handshake reads are bounded (`HANDSHAKE_TIMEOUT`, stall attempt limits) to resist slowloris-style hangs.
 - Transfers are **serialized** per session (one direction at a time, atomic `in_flight` gate) to keep UX and state simple.
-- Temp files use a `.frostwallpart` suffix and are atomically renamed only after hash verification.
+- Temp files use a `.frostwallpart` suffix, are `fsync`'d, and are atomically renamed only after hash verification. Crash leftovers are swept on the next receive.
 - Name collisions become `file (1).txt`, `file (2).txt`, … — never silent overwrite.
 - **Transport is not trust** — whether bytes arrive via a direct LAN socket or an `iroh` QUIC path (direct or relayed), pairing and encryption above are identical. The mailbox and any relay only ever see opaque `EndpointId`s / encrypted QUIC traffic, never plaintext, file data, or pairing material.
 
@@ -165,7 +166,8 @@ src-tauri/src/
 ├── config.rs       persisted user settings (download dir, device name, mailbox URL)
 └── commands.rs     Tauri API + session coordinator
 
-mailbox/src/main.rs  standalone rendezvous service: code → EndpointId, TTL
+mailbox/src/lib.rs   optional rendezvous: code → EndpointId + dial hints (self-host)
+mailbox/src/main.rs  standalone `frostwall-mailbox` binary
 
 src/
 ├── App.tsx         main UI (pairing, transfer, settings)
@@ -175,7 +177,7 @@ src/
 └── theme.ts        system / dark / light preference
 ```
 
-`src-tauri` and `mailbox` are members of one Cargo workspace (root [`Cargo.toml`](Cargo.toml)); the desktop app never depends on the mailbox crate or vice versa — they only agree on the tiny JSON contract in [Internet mode](#internet-mode-different-networks).
+`src-tauri` and `mailbox` are members of one Cargo workspace (root [`Cargo.toml`](Cargo.toml)). The desktop app talks to a mailbox only if you set an HTTPS URL in Settings; it does not start a localhost mailbox. Deploy `frostwall-mailbox` separately if you want 6-digit Remote lookup. They share the tiny JSON contract in [Internet mode](#internet-mode-different-networks).
 
 ## Development
 
@@ -183,27 +185,26 @@ src/
 # Frontend typecheck + production bundle
 pnpm build
 
-# Rust tests for the whole workspace (app + mailbox; 2 network-dependent
-# tests are #[ignore]d — mDNS multicast and a live iroh relay round-trip —
+# Rust tests for the whole workspace (app + mailbox; 4 network-dependent
+# tests are #[ignore]d — mDNS multicast and three live n0 iroh round-trips —
 # since they need real LAN/internet access that CI/sandboxes don't guarantee)
 cargo test --workspace
 
 # Lint / format (optional)
 cargo fmt --all
-cargo clippy --workspace -- -D warnings
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-CI runs on every push to `main` via [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — Rust tests for the whole workspace plus `pnpm build`.
+CI runs on every push to `main` via [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `pnpm build`.
 
 ## Roadmap
 
-- [ ] Optional QR-code / link exchange for internet mode (skip typing the `EndpointId` lookup round trip)
+- [ ] Optional QR-code for the Remote invite (today: copy/paste the ticket)
 - [ ] Multi-peer sessions over the internet (today: LAN only)
 
 ## Contributing
 
-Issues and pull requests are welcome. Please run `cargo test --workspace` and `pnpm build` before submitting changes.
+Issues and pull requests are welcome. Please run `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `pnpm build` before submitting changes.
 
 ## License
 

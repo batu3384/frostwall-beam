@@ -4,6 +4,7 @@
 //! e.g. `~/Library/Application Support/frostwall/` on macOS, `%APPDATA%/frostwall/` on Windows).
 //! Missing or malformed files degrade gracefully to defaults.
 
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -15,33 +16,60 @@ use serde::{Deserialize, Serialize};
 pub struct UserConfig {
     pub download_dir: Option<String>,
     pub device_name: Option<String>,
-    /// Base URL of the mailbox rendezvous service used for internet (non-LAN)
-    /// sessions. When unset, the app uses a built-in default (local sidecar in
-    /// dev, or `FROSTWALL_MAILBOX_URL` at compile time for release).
+    /// Optional mailbox URL. Remote pairing defaults to a shareable iroh
+    /// ticket (or legacy `fwb2-…`); a mailbox only lets joiners type the 6-digit code.
     pub mailbox_url: Option<String>,
 }
 
-/// True when a real (non-localhost-only) rendezvous URL is configured.
+/// Accept only HTTPS mailbox URLs in release; loopback HTTP in debug.
+pub fn mailbox_url_allowed(url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty()
+        || url.contains('@')
+        || url.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return false;
+    }
+    if url.len() >= 8 && url.is_char_boundary(8) && url[..8].eq_ignore_ascii_case("https://") {
+        let host = url[8..].split('/').next().unwrap_or("");
+        return !host.is_empty();
+    }
+    #[cfg(debug_assertions)]
+    {
+        // Exact loopback only — `http://127.0.0.1.evil.com` is not local.
+        let lower = url.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("http://127.0.0.1") {
+            return rest.is_empty() || rest.starts_with('/') || rest.starts_with(':');
+        }
+        if let Some(rest) = lower.strip_prefix("http://localhost") {
+            return rest.is_empty() || rest.starts_with('/') || rest.starts_with(':');
+        }
+    }
+    false
+}
+
+fn sanitize_mailbox_url(url: Option<&str>) -> Option<String> {
+    let t = url?.trim();
+    if t.is_empty() || !mailbox_url_allowed(t) {
+        return None;
+    }
+    Some(t.trim_end_matches('/').to_string())
+}
+
+/// True when a mailbox URL is set (Settings or `FROSTWALL_MAILBOX_URL`).
+/// That only enables 6-digit Remote lookup — it is not a relay.
 pub fn remote_mailbox_configured(stored: &Option<String>) -> bool {
-    if stored.as_ref().is_some_and(|s| !s.trim().is_empty()) {
-        return true;
-    }
-    option_env!("FROSTWALL_MAILBOX_URL").is_some_and(|u| !u.is_empty())
+    configured_mailbox_url(stored).is_some()
 }
 
-/// Resolve a configured mailbox URL (user override → build-time). No localhost fallback.
+/// Resolve a configured mailbox URL (user override → build-time).
+/// Rejects `http://` (except debug loopback) so a planted config cannot
+/// bypass [`mailbox_url_allowed`].
 pub fn configured_mailbox_url(stored: &Option<String>) -> Option<String> {
-    if let Some(url) = stored.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        return Some(url.to_string());
+    if let Some(url) = sanitize_mailbox_url(stored.as_deref()) {
+        return Some(url);
     }
-    option_env!("FROSTWALL_MAILBOX_URL")
-        .filter(|u| !u.is_empty())
-        .map(str::to_string)
-}
-
-/// Start the embedded localhost mailbox only when no remote URL is configured.
-pub fn should_spawn_local_mailbox(stored: &Option<String>) -> bool {
-    !remote_mailbox_configured(stored)
+    sanitize_mailbox_url(option_env!("FROSTWALL_MAILBOX_URL"))
 }
 
 /// Canonical config file: `<config_dir>/frostwall/config.json`.
@@ -65,41 +93,44 @@ pub fn save(cfg: &UserConfig) -> Result<()> {
 
 fn load_at(path: &Path) -> UserConfig {
     // Refuse to read a config file that is a symlink (planted-symlink defense).
-    if std::fs::symlink_metadata(path)
-        .map(|m| m.is_symlink())
-        .unwrap_or(false)
-    {
+    if crate::transfer::is_link_like_path(path) {
         return UserConfig::default();
     }
     match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Ok(bytes) => {
+            let mut cfg: UserConfig = serde_json::from_slice(&bytes).unwrap_or_default();
+            cfg.mailbox_url = sanitize_mailbox_url(cfg.mailbox_url.as_deref());
+            cfg
+        }
         Err(_) => UserConfig::default(),
     }
 }
 
 fn save_at(path: &Path, cfg: &UserConfig) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)
+    if crate::transfer::path_has_symlink_component(path)
+        || crate::transfer::path_has_symlink_component(parent)
+    {
+        anyhow::bail!("refusing to write through a symlink");
+    }
+    crate::transfer::mkdir_abs_nofollow(parent)
         .with_context(|| format!("creating config dir {}", parent.display()))?;
 
-    let bytes = serde_json::to_vec_pretty(cfg).context("serializing config")?;
+    let mut persist = cfg.clone();
+    persist.mailbox_url = sanitize_mailbox_url(persist.mailbox_url.as_deref());
+    let bytes = serde_json::to_vec_pretty(&persist).context("serializing config")?;
     let tmp = path.with_extension("json.tmp");
-
-    // Never follow a pre-existing temp path (could be an attacker-planted
-    // symlink): if it is a symlink, remove it first.
-    if std::fs::symlink_metadata(&tmp)
-        .map(|m| m.is_symlink())
-        .unwrap_or(false)
+    // Crash leftover or planted symlink: truncate-open would follow.
+    // Remove then exclusive-create (O_EXCL does not follow a symlink).
+    let _ = std::fs::remove_file(&tmp);
+    let mut opts = OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
     {
-        let _ = std::fs::remove_file(&tmp);
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW);
     }
-
-    // Write + fsync the temp file so a crash cannot leave a torn config.
-    use std::fs::OpenOptions;
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
+    let mut f = opts
         .open(&tmp)
         .with_context(|| format!("writing config to {}", tmp.display()))?;
     f.write_all(&bytes)?;
@@ -144,6 +175,60 @@ mod tests {
     fn remote_mailbox_configured_when_stored() {
         assert!(remote_mailbox_configured(&Some("https://x.example".into())));
         assert!(!remote_mailbox_configured(&None));
+        assert!(!remote_mailbox_configured(&Some("http://evil.example".into())));
+        assert!(!remote_mailbox_configured(&Some("https://user@host".into())));
+    }
+
+    #[test]
+    fn mailbox_url_allowed_rejects_empty_host_and_userinfo() {
+        assert!(mailbox_url_allowed("https://mailbox.example.com"));
+        assert!(mailbox_url_allowed("https://mailbox.example.com/"));
+        assert!(mailbox_url_allowed("HTTPS://mailbox.example.com"));
+        assert!(mailbox_url_allowed("Https://mailbox.example.com/path"));
+        assert!(!mailbox_url_allowed("https://"));
+        assert!(!mailbox_url_allowed("https://user:pass@mailbox.example.com"));
+        assert!(!mailbox_url_allowed("http://example.com"));
+        #[cfg(debug_assertions)]
+        {
+            assert!(mailbox_url_allowed("http://127.0.0.1:8787"));
+            assert!(mailbox_url_allowed("HTTP://127.0.0.1:8787"));
+            assert!(mailbox_url_allowed("http://localhost/"));
+            assert!(mailbox_url_allowed("HTTP://localhost/"));
+            assert!(!mailbox_url_allowed("http://127.0.0.1.evil.com"));
+            assert!(!mailbox_url_allowed("http://localhost.evil.com"));
+        }
+    }
+
+    #[test]
+    fn load_drops_planted_http_mailbox_url() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            br#"{"mailbox_url":"http://evil.example/hook"}"#,
+        )
+        .expect("write");
+        let cfg = load_at(&path);
+        assert!(cfg.mailbox_url.is_none());
+        assert!(configured_mailbox_url(&Some("http://evil.example".into())).is_none());
+    }
+
+    #[test]
+    fn save_strips_planted_http_mailbox_url() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        let cfg = UserConfig {
+            download_dir: None,
+            device_name: None,
+            mailbox_url: Some("http://evil.example/hook".to_string()),
+        };
+        save_at(&path, &cfg).expect("save");
+        let raw = std::fs::read_to_string(&path).expect("read");
+        assert!(
+            !raw.contains("evil.example"),
+            "disk must not keep a planted http mailbox URL: {raw}"
+        );
+        assert!(load_at(&path).mailbox_url.is_none());
     }
 
     #[test]
@@ -202,5 +287,44 @@ mod tests {
         symlink(&real, &link).expect("symlink");
         // A symlinked config must be ignored (default), not followed.
         assert_eq!(load_at(&link), UserConfig::default());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_refuses_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("realdir");
+        std::fs::create_dir(&real).expect("realdir");
+        let link = dir.path().join("frostwall");
+        symlink(&real, &link).expect("symlink parent");
+        let path = link.join("config.json");
+        let err = save_at(&path, &UserConfig::default()).expect_err("symlink parent");
+        assert!(
+            err.to_string().contains("symlink"),
+            "got {err:#}"
+        );
+        assert!(!path.exists(), "must not write through the config parent symlink");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_does_not_follow_tmp_symlink() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        let secret = dir.path().join("secret.json");
+        std::fs::write(&secret, b"KEEP").expect("secret");
+        let tmp = path.with_extension("json.tmp");
+        symlink(&secret, &tmp).expect("plant tmp symlink");
+        let cfg = UserConfig {
+            download_dir: None,
+            device_name: Some("ok".into()),
+            mailbox_url: None,
+        };
+        save_at(&path, &cfg).expect("save");
+        assert_eq!(std::fs::read(&secret).expect("secret intact"), b"KEEP");
+        assert_eq!(load_at(&path).device_name.as_deref(), Some("ok"));
+        assert!(!tmp.exists());
     }
 }

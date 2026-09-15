@@ -121,7 +121,12 @@ pub fn confirmation_token(keys: &SessionKeys, role: Role) -> [u8; MAC_LEN] {
 }
 
 /// Verify a peer's confirmation token in constant time.
+/// Wrong length is a failed proof, not a panic (`subtle` 2.6 is len-safe;
+/// we still reject here so a truncated frame cannot depend on that).
 pub fn verify_confirmation(keys: &SessionKeys, role: Role, token: &[u8]) -> bool {
+    if token.len() != MAC_LEN {
+        return false;
+    }
     let expected = confirmation_token(keys, role);
     crypto::macs_equal(&expected, token)
 }
@@ -173,6 +178,17 @@ mod tests {
         let keys_bad = SessionKeys::derive(b"attacker-controlled-secret");
         let forged = confirmation_token(&keys_bad, Role::A);
         assert!(!verify_confirmation(&keys_good, Role::A, &forged));
+    }
+
+    #[test]
+    fn confirmation_rejects_truncated_token() {
+        let (keys, _) = agree("654321");
+        let token = confirmation_token(&keys, Role::A);
+        assert!(!verify_confirmation(&keys, Role::A, &token[..16]));
+        assert!(!verify_confirmation(&keys, Role::A, &[]));
+        let mut long = token.to_vec();
+        long.push(0);
+        assert!(!verify_confirmation(&keys, Role::A, &long));
     }
 
     #[test]

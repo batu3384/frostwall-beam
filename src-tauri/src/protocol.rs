@@ -15,11 +15,13 @@ pub const CHUNK_SIZE: usize = 256 * 1024;
 
 /// Current wire-format version. Bump on an incompatible change.
 const WIRE_VERSION: u8 = 1;
+/// Device name ceiling (invite JSON + post-handshake Hello).
+pub const MAX_DISPLAY_NAME: usize = 48;
 
-/// Cap passed to the bincode deserializer (matches the transport MAX_FRAME).
+/// Cap passed to the bincode deserializer (lockstep `transport::MAX_FRAME`).
 /// Defends against any code path that decodes untrusted bytes without the
 /// length-delimited codec's frame cap.
-const DECODE_LIMIT: u64 = 1 << 20;
+const DECODE_LIMIT: u64 = 8 << 20;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ManifestEntry {
@@ -41,13 +43,18 @@ pub enum Message {
     Done,
     /// Receiver -> sender: user accepted the incoming manifest; chunks may follow.
     Accept,
-    /// Receiver -> sender: user declined the incoming transfer.
+    /// Receiver -> sender: user declined the incoming transfer (before Accept).
+    /// After Accept, the same frame means payload verification failed (hash /
+    /// size / AEAD). Sender maps that to integrity failure.
     Reject,
     /// Either side: abort the in-flight transfer without tearing down the session.
     Cancel,
     /// AEAD-encrypted inner [`Message`] (`nonce || ciphertext+tag`), using the
     /// session control key. Hides manifest metadata and control replies on LAN TCP.
     Encrypted(Vec<u8>),
+    /// Post-handshake device name. Appended so existing Encrypted frames keep
+    /// the same bincode discriminant.
+    Hello(String),
 }
 
 /// Encode a message to `<version byte> || bincode(body)`.
@@ -78,6 +85,25 @@ pub fn decode(bytes: &[u8]) -> Result<Message> {
         .with_limit(DECODE_LIMIT)
         .deserialize(body)
         .map_err(|e| anyhow!("decode message: {e}"))
+}
+
+/// Trim, strip controls, cap at [`MAX_DISPLAY_NAME`]. Empty → `None`.
+pub fn sanitize_display_name(name: Option<&str>) -> Option<String> {
+    let t = name?.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for c in t.chars() {
+        if c.is_control() {
+            continue;
+        }
+        if out.len() + c.len_utf8() > MAX_DISPLAY_NAME {
+            break;
+        }
+        out.push(c);
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 #[cfg(test)]
@@ -111,6 +137,18 @@ mod tests {
         assert_eq!(decode(&encode(&Message::Accept).unwrap()).unwrap(), Message::Accept);
         assert_eq!(decode(&encode(&Message::Reject).unwrap()).unwrap(), Message::Reject);
         assert_eq!(decode(&encode(&Message::Cancel).unwrap()).unwrap(), Message::Cancel);
+        let hello = Message::Hello("Mac mini".into());
+        assert_eq!(decode(&encode(&hello).unwrap()).unwrap(), hello);
+    }
+
+    #[test]
+    fn sanitize_display_name_strips_and_caps() {
+        assert_eq!(sanitize_display_name(Some("  Mac mini  ")).as_deref(), Some("Mac mini"));
+        assert!(sanitize_display_name(Some("")).is_none());
+        assert!(sanitize_display_name(Some(" \t ")).is_none());
+        assert!(sanitize_display_name(Some("a\u{0007}b")).as_deref() == Some("ab"));
+        let long = "x".repeat(80);
+        assert_eq!(sanitize_display_name(Some(&long)).unwrap().len(), MAX_DISPLAY_NAME);
     }
 
     #[test]

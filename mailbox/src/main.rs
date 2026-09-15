@@ -13,7 +13,11 @@ async fn main() {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8787);
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let host = std::env::var("MAILBOX_BIND").unwrap_or_else(|_| "127.0.0.1".into());
+    let addr = frostwall_mailbox::parse_listen_addr(&host, port).unwrap_or_else(|e| {
+        eprintln!("frostwall-mailbox: {e}");
+        std::process::exit(1);
+    });
 
     tracing::info!("frostwall-mailbox listening on {addr}");
     let listener = tokio::net::TcpListener::bind(addr)

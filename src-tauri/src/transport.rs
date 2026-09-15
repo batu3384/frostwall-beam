@@ -11,17 +11,22 @@
 //! `internet.rs`, which builds a `Connection` via [`Connection::from_io`]).
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-/// Largest single framed message we will accept (1 MiB — comfortably above
-/// our 256 KiB encrypted file chunks).
-pub const MAX_FRAME: usize = 1 << 20;
+/// Largest single framed message we will accept (8 MiB). File chunks are
+/// 256 KiB; a 50_000-file Manifest with short/medium paths must still fit
+/// after AEAD wrapping. Pathological 4 KiB names are rejected by the
+/// transfer layer before this cap is used as a DoS bound.
+pub const MAX_FRAME: usize = 8 << 20;
+/// LAN TCP connect bound. A stale mDNS address must not hang Join forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Anything that can back a [`Connection`]: a duplex byte stream.
 pub trait Duplex: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -43,9 +48,15 @@ pub async fn bind(port: u16) -> Result<TcpListener> {
 
 /// Connect to a peer over LAN TCP and return a framed connection.
 pub async fn connect(addr: SocketAddr) -> Result<Connection> {
-    let stream = TcpStream::connect(addr)
+    connect_within(addr, CONNECT_TIMEOUT).await
+}
+
+async fn connect_within(addr: SocketAddr, limit: Duration) -> Result<Connection> {
+    let stream = tokio::time::timeout(limit, TcpStream::connect(addr))
         .await
+        .map_err(|_| anyhow!("timed out connecting to the peer"))?
         .map_err(|e| anyhow!("connect: {e}"))?;
+    let _ = stream.set_nodelay(true);
     Ok(Connection::from_io(stream))
 }
 
@@ -55,6 +66,7 @@ pub async fn accept(listener: &TcpListener) -> Result<Connection> {
         .accept()
         .await
         .map_err(|e| anyhow!("accept: {e}"))?;
+    let _ = stream.set_nodelay(true);
     Ok(Connection::from_io(stream))
 }
 
@@ -89,6 +101,19 @@ impl Connection {
             Some(Ok(b)) => Ok(b.to_vec()),
             Some(Err(e)) => Err(anyhow!("recv frame: {e}")),
             None => Err(anyhow!("connection closed by peer")),
+        }
+    }
+
+    /// Non-blocking poll: `Ok(Some)` if a complete frame is already buffered,
+    /// `Ok(None)` if the peer has not sent one yet. Does not cancel an
+    /// in-flight send. Used so a payload loop can notice `Cancel` after each
+    /// chunk without splitting the framed codec.
+    pub fn try_recv(&mut self) -> Result<Option<Vec<u8>>> {
+        match self.framed.next().now_or_never() {
+            None => Ok(None),
+            Some(Some(Ok(b))) => Ok(Some(b.to_vec())),
+            Some(Some(Err(e))) => Err(anyhow!("recv frame: {e}")),
+            Some(None) => Err(anyhow!("connection closed by peer")),
         }
     }
 }
@@ -148,5 +173,47 @@ mod tests {
         drop(server);
         let r = client.recv().await;
         assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn try_recv_empty_then_frame() {
+        let listener = bind(0).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = connect(addr).await.unwrap();
+        let mut server = accept(&listener).await.unwrap();
+        assert_eq!(client.try_recv().unwrap(), None);
+        server.send(b"ping").await.unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(b) = client.try_recv().unwrap() {
+                    return b;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("frame must become readable");
+        assert_eq!(got, b"ping");
+    }
+
+    #[tokio::test]
+    async fn connect_does_not_hang_on_blackhole() {
+        // TEST-NET-1 is documentation space; typically no RST. Must fail fast.
+        let addr = "192.0.2.1:1".parse().unwrap();
+        let t0 = tokio::time::Instant::now();
+        let err = match connect_within(addr, Duration::from_millis(400)).await {
+            Ok(_) => panic!("blackhole connect must not succeed"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("timed out") || msg.contains("connect"),
+            "{msg}"
+        );
+        assert!(
+            t0.elapsed() < Duration::from_secs(3),
+            "LAN connect must be bounded, elapsed={:?}",
+            t0.elapsed()
+        );
     }
 }

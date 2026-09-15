@@ -10,15 +10,15 @@ Track bugs and requests: [Issues](https://github.com/batu3384/frostwall-beam/iss
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Hosted mailbox release path | Now | Document + ship `FROSTWALL_MAILBOX_URL` for production Remote mode |
-| Wiki + operator docs | Now | This wiki; mailbox TLS deploy guide in Getting Started |
+| Hosted mailbox (optional 6-digit Remote) | Next | Convenience only — invite path is the default |
+| Wiki + operator docs | Now | This wiki; mailbox TLS deploy still documented |
 | Signed Windows installers | Now | Authenticode for SmartScreen-friendly releases |
 
 ## Next
 
 | Item | Status | Notes |
 |------|--------|-------|
-| QR / link pairing for Remote | Next | README backlog — skip typing long codes |
+| QR for Remote invite | Next | README backlog — copy/paste the ticket works today |
 | Multi-peer Remote sessions | Next | README backlog — LAN multi-host exists; internet is 1:1 today |
 | Dependabot + advisory CI gate | Next | `cargo deny` / dependency audit in CI |
 
@@ -36,7 +36,8 @@ Track bugs and requests: [Issues](https://github.com/batu3384/frostwall-beam/iss
 | Tauri 2 app + LAN transfer | Done | mDNS, SPAKE2, AEAD chunks, Blake3 |
 | Internet mode foundation | Done | `iroh`, mailbox workspace, host/join commands |
 | Adversarial review hardening | Done | Control-plane AEAD, mailbox token auth, pairing bounds |
-| Embedded mailbox + UX polish | Done | Dynamic localhost port, `remoteAvailable` gate, theme tokens |
+| Invite-based Remote (no mailbox) | Done | iroh `EndpointTicket` + SPAKE2 digits; legacy `fwb2-` / `fwb1-`; mailbox optional |
+| Theme tokens + settings UX | Done | System/dark/light, mailbox URL is optional HTTPS |
 | CI: test + clippy + frontend build | Done | `.github/workflows/ci.yml` |
 
 ## Timeline (approximate)

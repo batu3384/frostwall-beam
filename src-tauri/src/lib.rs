@@ -1,6 +1,5 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 pub mod commands;
-pub mod mailbox_sidecar;
 pub mod config;
 pub mod crypto;
 pub mod discovery;
@@ -15,7 +14,6 @@ pub mod transport;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::AppState::new())
         .invoke_handler(tauri::generate_handler![

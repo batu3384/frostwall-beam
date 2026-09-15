@@ -2,7 +2,7 @@
 //! `mdns-sd` crate so no system Bonjour runtime is required on Windows.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
@@ -72,17 +72,26 @@ pub fn display_name_from_instance(instance: &str) -> String {
 }
 
 /// Browse the LAN for Frostwall hosts for up to `timeout`.
-pub fn browse_peers(timeout: Duration) -> Result<Vec<(String, IpAddr, u16)>> {
+/// `keep` returning false ends the wait early (Cancel bumps `session_epoch`
+/// while this runs on `spawn_blocking`).
+pub fn browse_peers_while(
+    timeout: Duration,
+    keep: impl Fn() -> bool,
+) -> Result<Vec<(String, IpAddr, u16)>> {
     use std::time::Instant;
     let disc = Discovery::new()?;
     let recv = disc.browse()?;
     let deadline = Instant::now() + timeout;
     let mut peers: HashMap<String, (String, IpAddr, u16)> = HashMap::new();
     while Instant::now() < deadline {
+        if !keep() {
+            break;
+        }
         if let Ok(ServiceEvent::ServiceResolved(info)) =
             recv.recv_timeout(Duration::from_millis(200))
         {
-            if let Some(ip) = info.get_addresses_v4().into_iter().next().map(IpAddr::V4) {
+            let ips = info.get_addresses().iter().map(|a| a.to_ip_addr());
+            if let Some(ip) = pick_browse_ip(ips) {
                 let instance = info
                     .get_fullname()
                     .split('.')
@@ -113,6 +122,52 @@ pub fn local_lan_ipv4() -> Option<Ipv4Addr> {
     }
 }
 
+fn local_lan_ipv6() -> Option<Ipv6Addr> {
+    let sock = UdpSocket::bind("[::]:0").ok()?;
+    sock.connect("[2001:4860:4860::8888]:80").ok()?;
+    match sock.local_addr().ok()? {
+        std::net::SocketAddr::V6(sa) => Some(*sa.ip()),
+        std::net::SocketAddr::V4(_) => None,
+    }
+}
+
+fn lan_bindable(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v) => {
+            !v.is_unspecified() && !v.is_loopback() && !v.is_multicast() && !v.is_broadcast()
+        }
+        IpAddr::V6(v) => !v.is_unspecified() && !v.is_loopback() && !v.is_multicast(),
+    }
+}
+
+/// IPv4 preferred; IPv6 when this host has no usable v4 (IPv6-only LAN).
+pub fn local_lan_ip() -> Option<IpAddr> {
+    if let Some(v4) = local_lan_ipv4() {
+        let ip = IpAddr::V4(v4);
+        if lan_bindable(&ip) {
+            return Some(ip);
+        }
+    }
+    local_lan_ipv6().map(IpAddr::V6).filter(lan_bindable)
+}
+
+/// Prefer IPv4 from an mDNS record, then IPv6. Skip loopback / unspecified.
+fn pick_browse_ip(addrs: impl IntoIterator<Item = IpAddr>) -> Option<IpAddr> {
+    let mut v6 = None;
+    for ip in addrs {
+        if !lan_bindable(&ip) {
+            continue;
+        }
+        if ip.is_ipv4() {
+            return Some(ip);
+        }
+        if v6.is_none() {
+            v6 = Some(ip);
+        }
+    }
+    v6
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,9 +186,7 @@ mod tests {
         let brw = Discovery::new().unwrap();
 
         let port = 45123u16;
-        let ip = local_lan_ipv4()
-            .map(IpAddr::V4)
-            .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+        let ip = local_lan_ip().unwrap_or_else(|| "127.0.0.1".parse().unwrap());
         adv.advertise("kopru-unit-test", ip, port).unwrap();
 
         let recv = brw.browse().unwrap();
@@ -164,5 +217,33 @@ mod tests {
     #[test]
     fn local_lan_ipv4_does_not_panic() {
         let _ = local_lan_ipv4();
+    }
+
+    #[test]
+    fn local_lan_ip_does_not_panic() {
+        let _ = local_lan_ip();
+    }
+
+    #[test]
+    fn pick_browse_ip_prefers_v4_then_v6() {
+        let v4: IpAddr = "192.168.1.9".parse().unwrap();
+        let v6: IpAddr = "fd00::9".parse().unwrap();
+        let lo4: IpAddr = "127.0.0.1".parse().unwrap();
+        let lo6: IpAddr = "::1".parse().unwrap();
+        assert_eq!(pick_browse_ip([v6, v4]), Some(v4));
+        assert_eq!(pick_browse_ip([v6]), Some(v6));
+        assert!(pick_browse_ip([lo4, lo6]).is_none());
+        assert_eq!(pick_browse_ip([lo6, v6]), Some(v6));
+    }
+
+    #[test]
+    fn browse_peers_while_stops_when_keep_false() {
+        let start = Instant::now();
+        let peers = browse_peers_while(Duration::from_secs(5), || false).unwrap();
+        assert!(peers.is_empty());
+        assert!(
+            start.elapsed() < Duration::from_millis(800),
+            "cancelled browse must not sit on the 5s timeout"
+        );
     }
 }

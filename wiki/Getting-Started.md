@@ -30,9 +30,9 @@ pnpm tauri build
 
 ## First transfer (two devices)
 
-1. **Host (Device A)** — *Host a session* → create the 6-digit code → share it.
-2. **Join (Device B)** — *Join a session* → enter the code → *Connect* (pick a host if several appear on the LAN).
-3. **Verify** — confirm the **rotating 6-digit code** matches on both screens.
+1. **Host (Device A)** — *Host a session*. Same Wi‑Fi: share the 6-digit code. **Remote:** copy the invite (same Wi‑Fi not required).
+2. **Join (Device B)** — same network mode → *Join a session* → enter the code **or paste the invite** → *Connect*.
+3. **Verify** — both screens show the same **rotating 6-digit code**. Confirm **codes match** (or **Kodlar aynı**) before sending; a mismatch disconnects.
 4. **Send** — drag files/folders or use the file picker.
 5. **Receive** — review the manifest → **Accept** or **Decline**.
 6. Files land in `~/Downloads/Frostwall Beam` by default, or your folder in **Settings**.
@@ -41,19 +41,18 @@ pnpm tauri build
 
 ## Remote mode (different networks)
 
-Remote pairing appears in the UI only when a **real rendezvous URL** is configured:
+Pick **Remote** on both devices. The host copies an invite (iroh ticket with relay/IP hints); the joiner pastes it. `iroh` dials by public key over QUIC. **No mailbox required.** The host keeps waiting until **Cancel** — sharing the invite does not have a 5-minute deadline. If the host later toasts that a relay was found, copy the invite again before the joiner pastes.
 
-- User setting: mailbox URL in config (HTTPS in release builds), or
-- Release build with compile-time `FROSTWALL_MAILBOX_URL=https://…`
-
-Both devices must pick **Remote** and use the same code. Deploy the mailbox service:
+Optional: deploy a mailbox so joiners can type only the 6-digit code:
 
 ```bash
 cargo run --release -p frostwall-mailbox
-# default bind: 0.0.0.0:8787 — put TLS in front (Caddy, Nginx, Fly.io, etc.)
+# default: 127.0.0.1:8787. Public: MAILBOX_BIND=0.0.0.0 PORT=8787 — put TLS in front.
 ```
 
-See [Architecture](Architecture#network-paths) for how mailbox + `iroh` fit together.
+Then set **Settings → Pairing server** (HTTPS in release) or build with `FROSTWALL_MAILBOX_URL=https://…`.
+
+See [Architecture](Architecture#network-paths) for invite vs mailbox vs `iroh`.
 
 ## Development checks
 

@@ -1,6 +1,6 @@
 # Frostwall Beam
 
-**Encrypted file transfer** for the same Wi‑Fi — or across the internet when a rendezvous server is configured. Pair two devices with a short code, verify with a rotating check digit, send files or folders end-to-end encrypted. No cloud account, no tracking.
+**Encrypted file transfer** for the same Wi‑Fi — or across the internet with a copy-paste invite. Pair two devices, verify with a rotating check digit, send files or folders end-to-end encrypted. No cloud account, no tracking.
 
 | | |
 |---|---|
@@ -14,7 +14,7 @@
 | Area | What you get |
 |------|----------------|
 | **Same Wi‑Fi** | Zero-config mDNS discovery, direct LAN socket, multi-host picker |
-| **Remote** | NAT traversal via `iroh` (QUIC), rendezvous through a self-hosted mailbox |
+| **Remote** | NAT traversal via `iroh` (QUIC). Default: share an iroh ticket invite (relay + IPs). Optional mailbox for 6-digit lookup |
 | **Pairing** | 6-digit code + key-confirmation MAC + 30s rotating verification code |
 | **Transfer** | Files & folders, drag-and-drop, live speed/ETA, collision-safe renames |
 | **Control** | Accept/decline manifests; cancel in-flight without disconnecting |

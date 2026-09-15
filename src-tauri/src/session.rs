@@ -23,7 +23,7 @@
 //! - `tokA`/`tokB` are key-confirmation MACs; each side verifies the peer's
 //!   token before the session is established. A wrong code or a terminating
 //!   MITM fails here.
-//! - Each recv() is bounded by `HANDSHAKE_TIMEOUT` (slowloris defense).
+//! - Each send/recv is bounded by `HANDSHAKE_TIMEOUT` (slowloris defense).
 //!   Reordering any step deadlocks the handshake with no further error.
 
 use std::time::Duration;
@@ -37,8 +37,9 @@ use crate::pairing::{self, Role};
 use crate::transport::Connection;
 
 /// Per-message timeout during the SPAKE2 handshake. A peer that opens the TCP
-/// connection then stalls (slowloris) is dropped instead of wedging the
-/// single accept slot indefinitely.
+/// (or QUIC) connection then stalls is dropped instead of wedging the
+/// single accept slot. Handshake failure discards the pipe, so cancelling
+/// an in-flight send here cannot desync a live session.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A random 6-digit pairing code for the host to display.
@@ -50,6 +51,13 @@ pub fn generate_pairing_code() -> String {
 /// Receive one frame, but abort if the peer stalls past `HANDSHAKE_TIMEOUT`.
 async fn recv_or_timeout(conn: &mut Connection) -> Result<Vec<u8>> {
     match tokio::time::timeout(HANDSHAKE_TIMEOUT, conn.recv()).await {
+        Ok(r) => r,
+        Err(_) => Err(anyhow!("handshake timed out (peer stalled)")),
+    }
+}
+
+async fn send_or_timeout(conn: &mut Connection, bytes: &[u8]) -> Result<()> {
+    match tokio::time::timeout(HANDSHAKE_TIMEOUT, conn.send(bytes)).await {
         Ok(r) => r,
         Err(_) => Err(anyhow!("handshake timed out (peer stalled)")),
     }
@@ -89,14 +97,14 @@ impl Session {
 /// returns a session on success.
 pub async fn host_handshake(mut conn: Connection, code: &str) -> Result<Session> {
     let (pairing_state, msg_a) = pairing::Pairing::start(Role::A, code);
-    conn.send(&msg_a).await?;
+    send_or_timeout(&mut conn, &msg_a).await?;
     let msg_b = recv_or_timeout(&mut conn).await?;
     let secret = pairing_state.finish(&msg_b)?;
     let keys = SessionKeys::derive(&secret);
 
     // Prove we derived the key, and require the peer to prove the same.
     let our_tok = pairing::confirmation_token(&keys, Role::A);
-    conn.send(&our_tok).await?;
+    send_or_timeout(&mut conn, &our_tok).await?;
     let their_tok = recv_or_timeout(&mut conn).await?;
     if !pairing::verify_confirmation(&keys, Role::B, &their_tok) {
         return Err(anyhow!("key confirmation failed (wrong code or MITM)"));
@@ -108,7 +116,7 @@ pub async fn host_handshake(mut conn: Connection, code: &str) -> Result<Session>
 pub async fn joiner_handshake(mut conn: Connection, code: &str) -> Result<Session> {
     let (pairing_state, msg_b) = pairing::Pairing::start(Role::B, code);
     let msg_a = recv_or_timeout(&mut conn).await?;
-    conn.send(&msg_b).await?;
+    send_or_timeout(&mut conn, &msg_b).await?;
     let secret = pairing_state.finish(&msg_a)?;
     let keys = SessionKeys::derive(&secret);
 
@@ -117,7 +125,7 @@ pub async fn joiner_handshake(mut conn: Connection, code: &str) -> Result<Sessio
         return Err(anyhow!("key confirmation failed (wrong code or MITM)"));
     }
     let our_tok = pairing::confirmation_token(&keys, Role::B);
-    conn.send(&our_tok).await?;
+    send_or_timeout(&mut conn, &our_tok).await?;
     Ok(Session::new(conn, keys))
 }
 

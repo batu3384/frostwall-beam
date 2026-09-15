@@ -16,7 +16,7 @@ Markdown in this directory is the **source of truth** for the GitHub Wiki. It is
 1. Resolves `GITHUB_REPOSITORY` (default: `batu3384/frostwall-beam`)
 2. Clones or updates `.wiki.git` via `gh auth token`
 3. `rsync --delete` from `wiki/` → wiki clone (excludes `.git`, `README.md`)
-4. Commits and pushes to `master` on the wiki remote
+4. Commits and pushes to `master` (falls back to `main` if that is the wiki default)
 
 ## Local preview
 

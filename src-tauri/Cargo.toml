@@ -20,7 +20,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -49,16 +48,22 @@ mdns-sd = "0.20"
 # Internet transport: NAT traversal + relay fallback (iroh), and an HTTP
 # client to talk to the mailbox rendezvous service (reqwest).
 iroh = "1.0.1"
-reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls"] }
-frostwall-mailbox = { path = "../mailbox" }
+iroh-tickets = "1.0.0"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "stream"] }
 
 # utils
 anyhow = "1"
-thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
+# Local relay server for Remote e2e (no n0, no LAN IPs). Not used in release.
+iroh = { version = "1.0.1", features = ["test-utils"] }
+# HTTP mailbox client tests only — not linked into the app.
+frostwall-mailbox = { path = "../mailbox" }
 
