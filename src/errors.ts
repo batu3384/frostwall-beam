@@ -1,6 +1,7 @@
 /** Map backend error strings to i18n keys (substring match, first hit wins). */
 const ERROR_RULES: [string, string][] = [
   ["not connected", "err.notConnected"],
+  ["verify the pairing codes", "err.verifyCodes"],
   ["a transfer is already in progress", "err.transferInProgress"],
   ["no pending transfer", "err.noPendingTransfer"],
   ["transfer decision already handled", "err.decisionHandled"],

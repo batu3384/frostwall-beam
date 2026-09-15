@@ -33,3 +33,8 @@ export function lanCodeFromInput(s: string): string {
   if (compact.includes("fwb")) return "";
   return compact.replace(/\D/g, "");
 }
+
+/** 6 pairing digits, not an invite. Lockstep `commands.rs` `six_digit_join_code`. */
+export function looksLikeBarePairingCode(s: string): boolean {
+  return lanCodeFromInput(s).length === 6 && !looksLikeInvite(s);
+}

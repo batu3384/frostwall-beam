@@ -8,7 +8,7 @@ import { translateError } from "./errors";
 import { appendHistory, loadHistory, type TransferRecord } from "./history";
 import { useI18n, type Lang } from "./i18n";
 import { applyTheme, readTheme, saveTheme, watchSystemTheme, type Theme } from "./theme";
-import { INVITE_PASTE_MAX, lanCodeFromInput, looksLikeInvite } from "./invite";
+import { INVITE_PASTE_MAX, lanCodeFromInput, looksLikeBarePairingCode, looksLikeInvite } from "./invite";
 
 type Phase = "idle" | "hosting" | "joining" | "connected";
 type Mode = "host" | "join";
@@ -620,6 +620,9 @@ export default function App() {
       liveEpoch.current = -1;
       pendingEpochEvts.current = [];
       setJoinDial(false);
+      if (!invitePaste && looksLikeBarePairingCode(trimmed) && (config?.remoteAvailable ?? false)) {
+        pushToast("info", t("join.mailboxTrust"));
+      }
       try {
         const ep = await invoke<number>("join_internet", { invite: trimmed });
         if (gen !== opGen.current) return;
@@ -673,7 +676,7 @@ export default function App() {
       phaseRef.current = "idle";
       showError(String(e)); setPhase("idle");
     }
-  }, [joinCode, net, showError, t, config?.remoteAvailable, flushPendingEpoch]);
+  }, [joinCode, net, showError, t, config?.remoteAvailable, flushPendingEpoch, pushToast]);
 
   const connectToPeer = useCallback(async (peer: DiscoveredPeer) => {
     const lanDigits = lanCodeFromInput(joinCode);
@@ -875,7 +878,7 @@ export default function App() {
                 className="frost-panel flex h-11 w-11 items-center justify-center rounded-full text-secondary transition hover:text-accent disabled:opacity-40">
                 <Icon name="gear" />
               </button>
-              <StatusPill phase={phase} net={net} inviteReady={!!invite} pairing={pairing} t={t} />
+              <StatusPill phase={phase} net={net} inviteReady={!!invite} pairing={pairing} sasOk={sasOk} t={t} />
             </div>
           </div>
         </header>
@@ -1114,7 +1117,7 @@ export default function App() {
                           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-70" />
                           <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-400" />
                         </span>
-                        {t("connected.secure")}
+                        {t(sasOk ? "connected.secure" : "connected.verifying")}
                       </div>
                       <span className="text-xs text-muted">{t("connected.rotates").replace("{n}", String(secLeft))}</span>
                     </div>
@@ -1141,7 +1144,9 @@ export default function App() {
                           </p>
                         )}
                         <div className="mt-3 flex gap-2">
-                          <button type="button" disabled={liveness.length !== 6} onClick={() => setSasOk(true)}
+                          <button type="button" disabled={liveness.length !== 6} onClick={() => {
+                            void invoke("confirm_sas").then(() => setSasOk(true)).catch((e) => showError(String(e)));
+                          }}
                             className="frost-glow min-h-11 flex-1 rounded-xl bg-gradient-to-r from-sky-400 via-sky-500 to-cyan-500 px-3 py-2.5 text-sm font-medium text-white transition hover:brightness-110 active:scale-[0.99] disabled:opacity-40">
                             {t("connected.verifyYes")}
                           </button>
@@ -1268,7 +1273,7 @@ export default function App() {
           config={config} saveDirLabel={saveDirLabel} history={history} mailboxOn={mailboxOn}
           formatBytes={formatBytes}
           identityLocked={phase !== "idle"}
-          saveDirLocked={!!(transfer || sendPrep || recvPrep || xferLive)}
+          saveDirLocked={!!(transfer || sendPrep || recvPrep || pendingTransfer || xferLive)}
           onChooseSaveDir={chooseSaveDir} onClose={() => setShowSettings(false)}
           onSaved={refreshConfig}
           onMailboxSaved={(cleared) => pushToast("ok", t(cleared ? "toast.mailboxUrlCleared" : "toast.mailboxUrlSaved"))} />
@@ -1293,16 +1298,16 @@ export default function App() {
 
 /* ---------- sub-components ---------- */
 
-function StatusPill({ phase, net, inviteReady, pairing, t }: {
-  phase: Phase; net: Net; inviteReady: boolean; pairing: boolean; t: (k: string) => string
+function StatusPill({ phase, net, inviteReady, pairing, sasOk, t }: {
+  phase: Phase; net: Net; inviteReady: boolean; pairing: boolean; sasOk: boolean; t: (k: string) => string
 }) {
   let key = "status.offline";
   let dot = "bg-slate-500";
   let text = "text-muted";
   if (phase === "connected") {
-    key = "status.encrypted";
-    dot = "bg-emerald-400";
-    text = "text-ok";
+    key = sasOk ? "status.encrypted" : "status.verify";
+    dot = sasOk ? "bg-emerald-400" : "bg-amber-400";
+    text = sasOk ? "text-ok" : "text-warn";
   } else if (phase === "joining" || pairing) {
     key = "status.connecting";
     dot = "bg-amber-400";
