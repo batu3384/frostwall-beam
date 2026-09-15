@@ -23,6 +23,7 @@
 | Could not reach peer | NAT / firewall / iroh relay | Retry; allow outbound **HTTPS 443** to n0. UDP/QUIC holepunch is optional — relayed path is websocket |
 | Host drops while waiting | Old builds ended Remote host after 5 minutes, or after one failed joiner dial / stream pair | Current: host keeps the invite until **Cancel**. A failed join does not reset the host. Joiner retries. Optional mailbox TTL is refreshed while hosting; if refresh fails, paste the invite |
 | Host shows relay warning | No home HTTPS relay yet | App keeps hunting ~25s after the first invite and rewrites it when a relay homes — copy again after the toast. A public IP (not RFC1918/CGNAT) may still work. If neither appears: DNS or HTTPS 443 to n0 blocked. |
+| Two devices, two different NATs / ISPs | Field proof — CI cannot manufacture this | Two machines on two networks (phone hotspot vs home Wi‑Fi). Both pick **Remote**. Host: wait for relay toast, copy invite. Joiner: paste invite (not 6-digit mailbox). Confirm rotating codes, send one file. Outbound **HTTPS 443** to `*.relay.n0.iroh.link`. Loopback / same-LAN / `#[ignore]` n0 tests are not this proof. |
 
 ## Transfer
 

@@ -10,7 +10,6 @@ Track bugs and requests: [Issues](https://github.com/batu3384/frostwall-beam/iss
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Hosted mailbox (optional 6-digit Remote) | Next | Convenience only — invite path is the default |
 | Wiki + operator docs | Now | This wiki; mailbox TLS deploy still documented |
 | Signed Windows installers | Now | Authenticode for SmartScreen-friendly releases |
 
@@ -18,9 +17,10 @@ Track bugs and requests: [Issues](https://github.com/batu3384/frostwall-beam/iss
 
 | Item | Status | Notes |
 |------|--------|-------|
+| Hosted mailbox (optional 6-digit Remote) | Next | Convenience only — invite path is the default |
 | QR for Remote invite | Next | README backlog — copy/paste the ticket works today |
 | Multi-peer Remote sessions | Next | README backlog — LAN multi-host exists; internet is 1:1 today |
-| Dependabot + advisory CI gate | Next | `cargo deny` / dependency audit in CI |
+| Advisory CI gate (`cargo deny`) | Next | Dependabot covers updates; deny/audit still optional |
 
 ## Later
 
@@ -38,7 +38,8 @@ Track bugs and requests: [Issues](https://github.com/batu3384/frostwall-beam/iss
 | Adversarial review hardening | Done | Control-plane AEAD, mailbox token auth, pairing bounds |
 | Invite-based Remote (no mailbox) | Done | iroh `EndpointTicket` + SPAKE2 digits; legacy `fwb2-` / `fwb1-`; mailbox optional |
 | Theme tokens + settings UX | Done | System/dark/light, mailbox URL is optional HTTPS |
-| CI: test + clippy + frontend build | Done | `.github/workflows/ci.yml` |
+| CI: test + clippy + frontend | Done | Linux / macOS / Windows rust jobs; `pnpm test` + `pnpm build` |
+| Dependabot | Done | Weekly cargo / npm / GitHub Actions PRs |
 
 ## Timeline (approximate)
 

@@ -182,7 +182,8 @@ src/
 ## Development
 
 ```bash
-# Frontend typecheck + production bundle
+# Frontend tests + typecheck + production bundle
+pnpm test
 pnpm build
 
 # Rust tests for the whole workspace (app + mailbox; 4 network-dependent
@@ -195,7 +196,7 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-CI runs on every push to `main` via [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `pnpm build`.
+CI runs on every push to `main` via [`.github/workflows/ci.yml`](.github/workflows/ci.yml) — Rust test+clippy on Linux, macOS, and Windows; frontend `pnpm test` + `pnpm build`.
 
 ## Roadmap
 
@@ -204,7 +205,7 @@ CI runs on every push to `main` via [`.github/workflows/ci.yml`](.github/workflo
 
 ## Contributing
 
-Issues and pull requests are welcome. Please run `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `pnpm build` before submitting changes.
+Issues and pull requests are welcome. Please run `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `pnpm test`, and `pnpm build` before submitting changes.
 
 ## License
 

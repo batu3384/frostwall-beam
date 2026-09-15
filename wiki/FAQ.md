@@ -20,7 +20,10 @@ Yes. SPAKE2 pairing derives session keys; every chunk is XChaCha20-Poly1305; fil
 Human verification against MITM — both screens must show the same 6-digit liveness code. Confirm **codes match** before sending; a mismatch disconnects.
 
 **Can the mailbox read my files?**  
-No. It stores `pairing code → EndpointId` plus relay/IP location hints briefly. File bytes never pass through it.
+No. It stores `pairing code → EndpointId` plus relay/IP location hints briefly. File bytes never pass through it. The pairing code **is** the SPAKE2 password — a mailbox operator sees it.
+
+**Is 6-digit Remote join as safe as pasting the invite?**  
+Paste the invite when you can. Digit-only join asks the pairing server for an EndpointId. A malicious server can return its own id; SPAKE2 still needs the shared code, and the rotating verification code is the human backstop.
 
 ## Networking
 

@@ -30,6 +30,17 @@ jobs:
       - name: "cargo clippy (workspace, deny warnings)"
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  rust-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: "cargo test (workspace: app + mailbox)"
+        run: cargo test --workspace
+      - name: "cargo clippy (workspace, deny warnings)"
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   rust-windows:
     runs-on: windows-latest
     steps:
@@ -53,4 +64,5 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm test
       - run: pnpm build

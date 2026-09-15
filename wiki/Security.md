@@ -31,7 +31,7 @@ Pairing code (SPAKE2)  →  session keys (HKDF)  →  encrypted frames (AEAD)
 
 | Component | Sees | Does not see |
 |-----------|------|----------------|
-| Mailbox | `code`, `EndpointId`, optional device name, relay/IP hints, TTL | Files, keys, SPAKE2 material |
+| Mailbox | Pairing code (SPAKE2 password), `EndpointId`, optional device name, relay/IP hints, TTL | File bytes, session keys, handshake transcript |
 | iroh relay | Encrypted QUIC packets | Plaintext payloads |
 | Host / joiner | Decrypted data after pairing | N/A |
 

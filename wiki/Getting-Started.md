@@ -57,9 +57,20 @@ See [Architecture](Architecture#network-paths) for invite vs mailbox vs `iroh`.
 ## Development checks
 
 ```bash
+pnpm test
 pnpm build
 cargo test --workspace
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-CI runs on every push to `main` — Rust tests + clippy + `pnpm build`.
+CI on every push to `main`: Rust test+clippy on Linux, macOS, and Windows; frontend `pnpm test` + `pnpm build`.
+
+## Two-network Remote (field proof)
+
+CI cannot prove two-NAT. On two machines, two networks (phone hotspot vs home):
+
+1. Both pick **Remote**. Host: wait until the relay toast, copy the invite.
+2. Joiner: **paste the invite** (not the 6-digit mailbox code).
+3. Confirm rotating codes match. Send one small file.
+
+Need outbound HTTPS 443 to n0 relays. If this fails, see [Troubleshooting](Troubleshooting#remote-mode).
