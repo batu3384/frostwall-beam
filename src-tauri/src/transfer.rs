@@ -88,15 +88,11 @@ pub fn needs_abort_drain(err: &anyhow::Error) -> bool {
         return false;
     }
     let s = err.to_string();
-    if s.contains("transfer rejected by peer")
+    !(s.contains("transfer rejected by peer")
         || s.contains("timed out waiting for the peer to accept")
         || s.contains("wanted Accept")
         || s.contains("nothing to send")
-        || s.contains("integrity check failed")
-    {
-        return false;
-    }
-    true
+        || s.contains("integrity check failed"))
 }
 
 /// Local `cancel_transfer` only. Peer abort still matches [`is_cancelled`] so
