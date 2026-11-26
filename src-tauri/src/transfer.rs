@@ -1915,7 +1915,7 @@ mod tests {
             Path::new("/tmp/out/dir/sub/b.txt")
         );
         assert!(manifest_fits_dest(base, &[ManifestEntry { rel_path: "a.txt".into(), size: 1 }]).is_ok());
-        let long = "a".repeat(4060);
+        let long = "a".repeat(MAX_REL_PATH_LEN + 1);
         assert!(manifest_fits_dest(base, &[ManifestEntry { rel_path: long, size: 1 }]).is_err());
     }
 

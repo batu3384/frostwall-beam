@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Sync wiki/ markdown to GitHub Wiki (.wiki.git clone).
+# Sync docs/wiki/ markdown to GitHub Wiki (.wiki.git clone).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-WIKI_SRC="${ROOT}/wiki"
+WIKI_SRC="${ROOT}/docs/wiki"
 WIKI_CLONE="${ROOT}/.wiki.git"
 REPO="${GITHUB_REPOSITORY:-batu3384/frostwall-beam}"
 
@@ -23,7 +23,22 @@ if ! gh auth status >/dev/null 2>&1; then
 fi
 
 TOKEN="$(gh auth token)"
-WIKI_URL="https://x-access-token:${TOKEN}@github.com/${REPO}.wiki.git"
+WIKI_URL="https://github.com/${REPO}.wiki.git"
+
+ASKPASS="$(mktemp "${TMPDIR:-/tmp}/frostwall-wiki-askpass.XXXXXX")"
+cleanup() {
+  rm -f "${ASKPASS}"
+}
+trap cleanup EXIT
+cat >"${ASKPASS}" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  *Username*) printf '%s\n' 'x-access-token' ;;
+  *) printf '%s\n' "${GH_WIKI_TOKEN:-}" ;;
+esac
+EOF
+chmod 700 "${ASKPASS}"
+export GH_WIKI_TOKEN="${TOKEN}" GIT_ASKPASS="${ASKPASS}" GIT_TERMINAL_PROMPT=0
 
 if [[ ! -d "${WIKI_CLONE}/.git" ]]; then
   echo "Cloning wiki into ${WIKI_CLONE} ..."
@@ -60,7 +75,7 @@ else
   git -C "${WIKI_CLONE}" pull --rebase origin "${WIKI_BRANCH}" 2>/dev/null || true
 fi
 
-echo "Rsync wiki/ → .wiki.git ..."
+echo "Rsync docs/wiki/ → .wiki.git ..."
 rsync -av --delete \
   --exclude='.git' \
   --exclude='README.md' \

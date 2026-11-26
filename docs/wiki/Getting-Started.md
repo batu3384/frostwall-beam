@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) 20+ and [pnpm](https://pnpm.io/)
+- [Node.js](https://nodejs.org/) 22.12+ and [pnpm](https://pnpm.io/) 10
 - [Rust](https://rustup.rs/) stable
 - [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) (Xcode CLT on macOS, MSVC on Windows)
 
@@ -59,8 +59,8 @@ See [Architecture](Architecture#network-paths) for invite vs mailbox vs `iroh`.
 ```bash
 pnpm test
 pnpm build
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 CI on every push to `main`: Rust test+clippy on Linux, macOS, and Windows; frontend `pnpm test` + `pnpm build`.
